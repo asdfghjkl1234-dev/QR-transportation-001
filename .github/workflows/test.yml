@@ -1,0 +1,21 @@
+name: 測試
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+jobs:
+  node-tests:
+    name: Node 測試（噴泉碼核心邏輯）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # 這個專案沒有任何執行期相依套件，所以不需要 npm install
+      - name: v1 核心測試
+        run: node test.node.mjs
