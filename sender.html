@@ -180,7 +180,7 @@
         <div class="ctl">
           <label>區塊大小 <span class="val" id="bsVal">600 bytes</span></label>
           <input type="range" id="bs" min="200" max="1200" step="50" value="600">
-          <div class="hint">越大吞吐越高，但 QR 越密、越難掃</div>
+          <div class="hint">越大吞吐越高，但 QR 越密、越難掃。<b>播放中調整需按「重新開始」才生效</b></div>
         </div>
         <div class="ctl">
           <label>QR 糾錯等級</label>
@@ -238,6 +238,7 @@ const state = {
   nextFrameAt: 0,      // 下一幀應該在什麼時候畫（毫秒，performance.now 時基）
   sentFrames: 0,
   fpsWindow: [],       // 最近的實際繪製時間點，用來算實測 FPS
+  lastText: null,      // 最後畫出來的 QR 內容，供重繪使用
 };
 
 const $ = (id) => document.getElementById(id);
@@ -442,6 +443,7 @@ function drawQR(text) {
 function renderNextFrame() {
   const pkt = state.encoder.nextPacket();
   const text = bytesToBase64(pkt.bytes);
+  state.lastText = text;   // 記下來，視窗大小改變時可以原樣重畫
 
   let version;
   try {
@@ -579,8 +581,14 @@ $('btnFull').addEventListener('click', () => {
   else stage.requestFullscreen?.().catch(() => showError('這個瀏覽器拒絕進入全螢幕'));
 });
 
-// 進出全螢幕、視窗大小改變時，QR 的像素尺寸要跟著重算 —— 下一幀自然會生效
-window.addEventListener('resize', () => { if (!state.playing && state.encoder) renderNextFrame(); });
+// 進出全螢幕或視窗大小改變時，QR 的像素尺寸要跟著重算。
+// 播放中不必特別處理，下一幀自然會用新尺寸；暫停中則原樣重畫同一幀 ——
+// 注意不能呼叫 renderNextFrame()，那會平白消耗掉一幀。
+window.addEventListener('resize', () => {
+  if (!state.playing && state.lastText) {
+    try { drawQR(state.lastText); } catch { /* 尺寸過小畫不下就忽略 */ }
+  }
+});
 </script>
 </body>
 </html>

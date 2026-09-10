@@ -574,6 +574,11 @@ document.addEventListener('visibilitychange', () => {
 });
 
 initEngine();
+
+// 供自動化測試用的注入點：讓測試腳本能餵進「假裝掃到的 QR 文字」，
+// 藉此驗證整條接收流程（session 判斷 → 解碼 → SHA-256 驗證 → 預覽與下載），
+// 而不需要真的架一台相機對著螢幕。正常使用不會碰到這個。
+window.__injectScan = handleQRText;
 </script>
 </body>
 </html>
