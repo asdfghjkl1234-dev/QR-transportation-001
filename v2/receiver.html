@@ -215,19 +215,36 @@ async function initEngine() {
  * ===================================================================== */
 async function startCamera() {
   showNote('camErr', 'err', '');
-  try {
-    S.stream = await navigator.mediaDevices.getUserMedia({
-      video: {
-        facingMode: { ideal: 'environment' },
-        width: { ideal: 1920 }, height: { ideal: 1080 },
-        frameRate: { ideal: 60, min: 30 },
-      },
-      audio: false,
-    });
-  } catch (e) {
-    let msg = `無法開啟相機：${e.name}`;
-    if (e.name === 'NotAllowedError') msg = '相機權限被拒絕，請在瀏覽器設定中允許後再試。';
-    else if (e.name === 'NotFoundError') msg = '找不到相機裝置。';
+
+  // 由嚴到寬依序嘗試。
+  // 這裡的每一項都刻意用 ideal（軟性偏好）而不是 min/exact（硬性要求）——
+  // 硬性要求一旦裝置滿足不了，getUserMedia 會直接丟 OverconstrainedError，
+  // 結果是「完全沒有相機」而不是「解析度低一點的相機」。
+  // 先要 1080p60，不行就退到 720p，最後退到「有相機就好」。
+  const attempts = [
+    { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 60 } },
+    { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } },
+    { facingMode: { ideal: 'environment' } },
+    true,
+  ];
+
+  let lastErr = null;
+  for (const video of attempts) {
+    try {
+      S.stream = await navigator.mediaDevices.getUserMedia({ video, audio: false });
+      lastErr = null;
+      break;
+    } catch (e) {
+      lastErr = e;
+      // 權限被拒或根本沒有裝置，再降級也沒用，直接停止嘗試
+      if (e.name === 'NotAllowedError' || e.name === 'NotFoundError') break;
+    }
+  }
+
+  if (lastErr) {
+    let msg = `無法開啟相機：${lastErr.name}`;
+    if (lastErr.name === 'NotAllowedError') msg = '相機權限被拒絕，請在瀏覽器設定中允許後再試。';
+    else if (lastErr.name === 'NotFoundError') msg = '找不到相機裝置。';
     else if (!window.isSecureContext) {
       msg = '這個頁面不是安全來源（HTTPS 或 localhost），瀏覽器不允許存取相機。'
           + '請用 HTTPS 部署，或參考 README 的 cloudflared 通道做法。';

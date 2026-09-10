@@ -10,6 +10,12 @@
 
 沒有 build 步驟，函式庫從 CDN 載入（並附本地備份）。把整個資料夾丟到任何靜態網站服務即可。
 
+> ### 也有 v2 高速版
+> [**`v2/`**](v2/) 是另一條路線（不是取代 v1，兩者可以並存），實測吞吐量約為 v1 的 4～11 倍：
+> **一幀多碼**（一次顯示 2×2 到 3×3 個獨立的 QR）、**Base45 + QR 英數模式**（每個碼多裝 31～42%）、
+> **精簡封包**（標頭 26 → 15 bytes）、**inactivation decoding**（解碼開銷 1.1～1.2× → 1.001～1.005×）。
+> 詳見 [v2 的 README](v2/README.md)。
+
 ---
 
 ## 為什麼用噴泉碼？
@@ -320,13 +326,18 @@ cloudflared tunnel --url http://localhost:8080
 ## 專案結構
 
 ```
-fountain.js      共用核心：PRNG、CRC32、SHA-256、Robust Soliton、封包、LT 編解碼器
-sender.html      發送端：切塊、產生 QR、Canvas 播放
-receiver.html    接收端：相機、QR 解碼、peeling 解碼、驗證與還原
-test.html        瀏覽器驗收測試（含真實的 QR 編碼→解碼往返）
-test.node.mjs    Node 測試（48 項，純邏輯層）
+fountain.js      v1 共用核心：PRNG、CRC32、SHA-256、Robust Soliton、封包、LT 編解碼器
+sender.html      v1 發送端：切塊、產生 QR、Canvas 播放
+receiver.html    v1 接收端：相機、QR 解碼、peeling 解碼、驗證與還原
+test.html        v1 瀏覽器驗收測試（含真實的 QR 編碼→解碼往返）
+test.node.mjs    v1 Node 測試（48 項，純邏輯層）
 vendor/          第三方函式庫的離線備份（CDN 連不上時自動啟用）
+
+v2/              高速版（一幀多碼 + Base45 + inactivation decoding），見 v2/README.md
 ```
+
+v2 的 `fountain2.js` 會直接引用 v1 `fountain.js` 裡與版本無關的元件
+（PRNG、CRC32、SHA-256、Robust Soliton、seed→區塊選擇），不重複實作已驗證過的部分。
 
 ### 第三方函式庫
 
@@ -345,8 +356,11 @@ vendor/          第三方函式庫的離線備份（CDN 連不上時自動啟�
 ## 測試
 
 ```sh
-npm test          # Node：48 項，涵蓋標準測試向量、CRC 防護、丟幀亂序還原
+npm test          # v1：48 項，涵蓋標準測試向量、CRC 防護、丟幀亂序還原
+npm run test:v2   # v2：65 項
 ```
+
+兩者都會在 GitHub Actions 上自動執行（見 `.github/workflows/test.yml`）。
 
 瀏覽器測試開 `test.html`，它會實際執行：
 **切塊 → 編碼 → 封包 → base64 → 真的畫成 QR → 真的用 jsQR 解回來 → peeling 解碼 → SHA-256 驗證**，
