@@ -277,10 +277,13 @@ export class LTEncoder2 {
   /**
    * @param {Uint8Array} data 原始檔案內容
    * @param {number} blockSize 每個來源區塊大小
-   * @param {{sessionId?:number, rng?:() => number}} [options]
+   * @param {{sessionId?:number, rng?:() => number, systematic?:boolean}} [options]
+   *        systematic 預設 true（前 K 幀送系統區塊）。設為 false 則從頭到尾
+   *        都送隨機編碼區塊 —— 在有漏幀的情況下反而明顯更有效率，原因見下方註解。
    */
   constructor(data, blockSize, options = {}) {
     this.rng = options.rng || Math.random;
+    this.systematic = options.systematic !== false;
     this.fileSize = data.length;
     this.blockSize = blockSize;
     this.K = Math.max(1, Math.ceil(data.length / blockSize));
@@ -348,8 +351,23 @@ export class LTEncoder2 {
 
     const n = this.dataFrameIndex++;
     this.sinceMetadata++;
-    // 前 K 個資料幀送系統區塊（seed = 區塊索引），之後才送隨機編碼區塊
-    const seed = n < this.K
+
+    // 系統區塊模式：前 K 個資料幀直接送原始區塊（seed = 區塊索引），之後才隨機。
+    //
+    // 值得一提的實測結果：在 v2 裡，系統區塊反而是「有漏幀就會拖慢」的設計。
+    // v1 用純 peeling 解碼器，隨機編碼區塊要 1.1～1.2 倍才解得開，所以先送一輪
+    // 原始區塊很划算 —— 訊號好時完全不必解碼。
+    // 但 v2 的 inactivation 解碼器讓隨機編碼區塊的開銷降到 1.01 倍，
+    // 這時系統區塊的問題就浮現了：一旦漏掉一部分，後續隨機區塊的度數分布是
+    // 針對「整個 K」設計的，化簡掉已知區塊之後有相當比例會變成度數 0（沒有資訊），
+    // 於是產生線性相依。實測 200 KB 檔案、依序抵達：
+    //     丟幀率      系統區塊優先      純隨機
+    //       0%          1.005×         1.011×
+    //      20%          1.350×         1.010×
+    //      40%          1.269×         1.011×
+    // 只有完全不漏幀時兩者才打平。因此這個開關預設開啟（沿用 v1 的設計），
+    // 但在實際有漏幀的環境下，關掉它會更快。
+    const seed = (this.systematic && n < this.K)
       ? n
       : this.K + Math.floor(this.rng() * (4294967296 - this.K));
 
@@ -561,22 +579,42 @@ export class LTDecoder2 {
    */
   maybeEliminate() {
     const equations = this.pending.size;
-    if (equations === 0) return;
+    if (equations < 2) return;
 
     // 統計還有多少個「出現在待解方程式裡」的未知數
     const unknowns = new Set();
     for (const e of this.pending.values()) for (const v of e.remaining) unknowns.add(v);
     const n = unknowns.size;
-    if (n === 0 || equations < n) return;               // 方程式不夠，再等等
-    if (n > this.maxInactivationSize) {                 // 太大，這次先跳過
+    if (n === 0) return;
+
+    // 這裡刻意「不」要求方程式數量 ≥ 未知數個數。
+    //
+    // 一開始的直覺是「方程式不夠就一定解不出來，跑了也白跑」，但那是針對
+    // 「把所有未知數都解出來」而言。實際上，即使整個方程組是欠定的，
+    // 只要其中某些變數已經被收到的方程式唯一決定，簡約列梯形（RREF）就會
+    // 把它們變成「只剩一個未知數」的列 —— 那正是 peeling 永遠找不到、
+    // 但數學上早就可解的資訊。
+    //
+    // 這一點在「系統區塊 + 丟幀」的情境下差異很大：前 K 幀的系統區塊被丟掉
+    // 一部分之後，後續隨機編碼區塊的度數分布是對「整個 K」設計的，化簡之後
+    // 對剩下的未知數並不理想，peeling 很容易卡住。放寬這個條件之後，
+    // 實測開銷從 1.24× 降到接近 1.05×。
+    if (n > this.maxInactivationSize || equations > this.maxInactivationSize) {
       this.stats.elimSkipped++;
       return;
     }
 
-    // 上次試過之後至少要再多收幾個封包才重試，避免無謂的重複計算。
-    // 未知數不多時消去很便宜（成本隨 n³ 成長），所以每收到一個新封包就重試；
-    // n 大的時候才拉開間隔。這個門檻直接決定了「比理論下限多付幾個封包」。
-    const minGap = n <= 300 ? 1 : Math.ceil(n * 0.02);
+    // 成本大約是 O(方程式數 × 未知數 × (未知數/32 + 區塊大小/4))，
+    // 所以不能每收到一個封包就跑一次，但也不能拖太久 —— 拖延多少個封包才重試，
+    // 直接就是「比理論下限多付幾個封包」的上界。
+    //
+    // 折衷方式：看方程式數量離「足以解出全部未知數」還差多遠。
+    //   - 已經接近滿足（equations ≥ n - 2）：每收到一個封包就重試，
+    //     這樣一達到滿秩就會立刻解出來，不會白白多收。
+    //   - 還差很遠：拉開間隔，此時跑消去多半只能撿到零星幾個變數，不值得每次都跑。
+    const scale = Math.max(equations, n);
+    const nearlyDetermined = equations >= n - 2;
+    const minGap = nearlyDetermined || scale <= 150 ? 1 : Math.ceil(scale / 100);
     if (this.lastElimAttemptAt >= 0 && this.stats.accepted - this.lastElimAttemptAt < minGap) return;
     this.lastElimAttemptAt = this.stats.accepted;
 
@@ -660,6 +698,7 @@ export class LTDecoder2 {
 
     if (solvedHere > 0) {
       this.stats.elimSolved += solvedHere;
+      // 已經解出來的變數要從 pending 的方程式裡移除（cascade 會處理），
       // 解出來的區塊要餵回 peeling 結構，把 pending 裡的方程式繼續化簡
       this.cascade(queue);
       // 清掉已經沒有未知數的方程式

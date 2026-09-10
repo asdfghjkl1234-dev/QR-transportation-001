@@ -1,0 +1,377 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>QR 串流傳檔 v2 — 瀏覽器驗收測試</title>
+<style>
+  :root{--bg:#0d0f14;--panel:#151922;--border:#242a36;--text:#e8ecf3;--muted:#98a2b4;
+        --accent:#5b9dff;--ok:#3ddc97;--danger:#ff6b6b}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);padding:24px 16px 60px;
+       font:14px/1.65 system-ui,-apple-system,"Noto Sans TC","Microsoft JhengHei",sans-serif}
+  .wrap{max-width:960px;margin:0 auto}
+  h1{font-size:20px;margin:0 0 4px}
+  .sub{color:var(--muted);font-size:13px;margin:0 0 20px}
+  #summary{padding:14px 16px;border-radius:11px;font-weight:600;margin-bottom:18px;
+           background:var(--panel);border:1px solid var(--border)}
+  #summary.ok{border-color:rgba(61,220,151,.5);color:var(--ok)}
+  #summary.bad{border-color:rgba(255,107,107,.5);color:var(--danger)}
+  h2{font-size:12px;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);
+     margin:22px 0 8px;font-weight:600}
+  .row{display:flex;gap:10px;padding:5px 10px;border-radius:6px;font-size:13.5px;align-items:baseline}
+  .row:nth-child(odd){background:rgba(255,255,255,.02)}
+  .row .mark{flex:none;width:16px;font-weight:700}
+  .row.pass .mark{color:var(--ok)} .row.fail .mark{color:var(--danger)}
+  .row .detail{color:var(--muted);font-size:12.5px;margin-left:auto;text-align:right;
+               font-variant-numeric:tabular-nums}
+  canvas{display:block;margin-top:10px;border-radius:8px;max-width:300px}
+  .peek{display:flex;gap:16px;flex-wrap:wrap}
+  .peek figcaption{color:var(--muted);font-size:12px;margin-top:6px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>v2 瀏覽器驗收測試</h1>
+  <p class="sub">
+    完整跑過 v2 的真實鏈路：<b>切塊 → LT 編碼 → v2 封包 → Base45 → 真的畫成多個 QR
+    → 真的用 zxing-wasm 一次解出全部 → inactivation 解碼 → SHA-256 驗證</b>，
+    並在過程中丟掉 40% 的碼、把順序完全打亂。<br>
+    純邏輯層的完整測試在 <code>v2/test.node.mjs</code>（<code>node v2/test.node.mjs</code>）。
+  </p>
+  <div id="summary">測試進行中…</div>
+  <div id="out"></div>
+  <div class="peek">
+    <figure style="margin:0"><canvas id="gridCanvas"></canvas>
+      <figcaption>實際合成的一幀（多碼網格）</figcaption></figure>
+    <figure style="margin:0"><canvas id="rgbCanvas"></canvas>
+      <figcaption>RGB 三通道模式的一幀</figcaption></figure>
+  </div>
+</div>
+
+<script type="module">
+import qrcode from './vendor/qrcode-generator-1.4.4.mjs';
+import { readBarcodes, prepareZXingModule } from './vendor/zxing-wasm-3.1.3/reader/index.js';
+import {
+  base45Encode, base45Decode, BASE45_CHARSET, blockSizeForVersion,
+  LTEncoder2, LTDecoder2, decodePacketV2, sha256Hex, mulberry32, V2_OVERHEAD,
+} from './fountain2.js';
+
+// wasm 指向本地檔案（預設會去 CDN 抓）
+prepareZXingModule({ overrides: { locateFile: (p, pre) =>
+  p.endsWith('.wasm') ? new URL('./vendor/zxing-wasm-3.1.3/reader/zxing_reader.wasm', import.meta.url).href : pre + p } });
+
+let passed = 0, failed = 0;
+const out = document.getElementById('out');
+const section = (t) => { const h = document.createElement('h2'); h.textContent = t; out.appendChild(h); };
+const check = (name, ok, detail = '') => {
+  ok ? passed++ : failed++;
+  const d = document.createElement('div');
+  d.className = 'row ' + (ok ? 'pass' : 'fail');
+  d.innerHTML = `<span class="mark">${ok ? '✓' : '✗'}</span><span>${name}</span><span class="detail">${detail}</span>`;
+  out.appendChild(d);
+};
+const info = (name, detail = '') => {
+  const d = document.createElement('div');
+  d.className = 'row';
+  d.innerHTML = `<span class="mark" style="color:var(--muted)">·</span>
+                 <span style="color:var(--muted)">${name}</span><span class="detail">${detail}</span>`;
+  out.appendChild(d);
+};
+const yieldUI = () => new Promise(r => setTimeout(r, 0));
+const makeData = (len, seed) => { const r = mulberry32(seed); const a = new Uint8Array(len);
+  for (let i = 0; i < len; i++) a[i] = (r() * 256) | 0; return a; };
+
+const QUIET = 4;
+
+/** 把一組 Base45 字串畫成網格（1 像素 = 1 模組再放大 scale 倍） */
+function renderGrid(canvas, texts, version, ecc, cols, rows, scale) {
+  const qrs = texts.map(t => { const q = qrcode(version, ecc); q.addData(t, 'Alphanumeric'); q.make(); return q; });
+  const m = qrs[0].getModuleCount(), cell = m + QUIET * 2;
+  canvas.width = cell * cols * scale; canvas.height = cell * rows * scale;
+  const ctx = canvas.getContext('2d', { alpha: false, willReadFrequently: true });
+  ctx.imageSmoothingEnabled = false;
+  ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = '#000';
+  qrs.forEach((q, idx) => {
+    const gx = (idx % cols) * cell, gy = ((idx / cols) | 0) * cell;
+    for (let r = 0; r < m; r++) for (let c = 0; c < m; c++)
+      if (q.isDark(r, c)) ctx.fillRect((gx + QUIET + c) * scale, (gy + QUIET + r) * scale, scale, scale);
+  });
+  return { modules: m, cell };
+}
+
+async function scan(canvas, maxSymbols) {
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  const r = await readBarcodes(img, { formats: ['QRCode'], maxNumberOfSymbols: maxSymbols, tryHarder: false });
+  return r.map(x => x.text);
+}
+
+/* ------------------------------------------------------------------ */
+async function testBase45QR() {
+  section('1. Base45 + QR 英數模式往返（驗收條件 2）');
+  const { blockSize, chars } = blockSizeForVersion(qrcode, 15, 'L');
+  info('v15/L 容量', `${chars} 英數字元 → 區塊 ${blockSize} bytes`);
+
+  // 隨機二進位 → Base45 → QR → 掃描 → Base45 解碼 → 逐位元組比對
+  let allOk = true, worstLen = 0;
+  const cv = document.createElement('canvas');
+  for (let t = 0; t < 6; t++) {
+    const bytes = makeData(blockSize, t + 1);
+    const text = base45Encode(bytes);
+    renderGrid(cv, [text], 15, 'L', 1, 1, 4);
+    const got = await scan(cv, 1);
+    const back = got.length === 1 ? base45Decode(got[0]) : null;
+    if (!back || back.length !== bytes.length || !back.every((v, i) => v === bytes[i])) allOk = false;
+    worstLen = Math.max(worstLen, text.length);
+    await yieldUI();
+  }
+  check('隨機二進位 → Base45 → QR → 解碼 → 還原，逐位元組相同', allOk, `6 組 × ${blockSize} bytes`);
+
+  // 對照 v1：base64 + 位元組模式能裝多少
+  let lo = 0, hi = 3000;
+  while (lo < hi) { const mid = (lo + hi + 1) >> 1;
+    try { const q = qrcode(15, 'L'); q.addData('A'.repeat(mid), 'Byte'); q.make(); lo = mid; } catch { hi = mid - 1; } }
+  const v1Block = Math.floor(lo / 4) * 3 - 26;
+  check('英數模式比 v1 的 base64+位元組模式多裝資料', blockSize > v1Block,
+    `v2 ${blockSize} B vs v1 ${v1Block} B（多 ${((blockSize / v1Block - 1) * 100).toFixed(0)}%）`);
+}
+
+/* ------------------------------------------------------------------ */
+async function testMultiCode() {
+  section('2. 一幀多碼：一次解出畫面中所有的碼');
+  const { blockSize } = blockSizeForVersion(qrcode, 15, 'L');
+  const cv = document.getElementById('gridCanvas');
+
+  for (const [cols, rows] of [[1, 1], [2, 2], [3, 2], [3, 3]]) {
+    const n = cols * rows;
+    const texts = Array.from({ length: n }, (_, i) => base45Encode(makeData(blockSize, i * 37 + cols)));
+    const g = renderGrid(cv, texts, 15, 'L', cols, rows, 3);
+    const t0 = performance.now();
+    const got = await scan(cv, n);
+    const ms = performance.now() - t0;
+    const all = texts.every(t => got.includes(t));
+    check(`${cols}×${rows} 網格 → 解出 ${got.length}/${n} 個且內容全對`, got.length === n && all,
+      `畫布 ${cv.width}×${cv.height}，${ms.toFixed(0)} ms`);
+    await yieldUI();
+  }
+
+  // 蓋掉其中一格，其餘各格必須完全不受影響
+  const texts = Array.from({ length: 4 }, (_, i) => base45Encode(makeData(blockSize, i * 11 + 5)));
+  renderGrid(cv, texts, 15, 'L', 2, 2, 3);
+  const ctx = cv.getContext('2d');
+  ctx.fillStyle = '#888';
+  ctx.fillRect(0, 0, cv.width / 2, cv.height / 2);      // 把左上那格塗掉
+  const got = await scan(cv, 4);
+  check('遮住其中一格，其餘三格仍正常解出', got.length === 3 && texts.slice(1).every(t => got.includes(t)),
+    `解出 ${got.length}/4`);
+}
+
+/* ------------------------------------------------------------------ */
+async function testEndToEnd() {
+  section('3. 端對端：真實 QR + 丟 40% + 亂序（驗收條件 1）');
+
+  const version = 15, ecc = 'L', cols = 2, rows = 2;
+  const { blockSize } = blockSizeForVersion(qrcode, version, ecc);
+  const fileSize = 40 * 1024;
+  const data = makeData(fileSize, 20260910);
+  const hash = sha256Hex(data);
+  const cv = document.createElement('canvas');
+
+  /**
+   * 跑一次完整流程。
+   * @param {boolean} systematic 是否啟用「前 K 幀送系統區塊」
+   */
+  async function runOnce(systematic) {
+    const enc = new LTEncoder2(data, blockSize, {
+      sessionId: 0x1234, rng: mulberry32(9), systematic,
+    });
+    enc.setMetadata({ name: 'v2.bin', type: 'application/octet-stream', sha256: hash });
+
+    // 真的一幀一幀畫出來、真的用 zxing 掃回來
+    const scanned = [];
+    let renderFail = 0;
+    const framesNeeded = Math.ceil(enc.K * 2.6 / (cols * rows));
+    for (let f = 0; f < framesNeeded; f++) {
+      const packets = enc.nextFrame(cols * rows);
+      renderGrid(cv, packets.map(p => p.text), version, ecc, cols, rows, 3);
+      const got = await scan(cv, cols * rows);
+      if (got.length !== packets.length) renderFail++;
+      scanned.push(...got);
+      if (f % 5 === 0) await yieldUI();
+    }
+
+    // 通道：丟 40% + 完全打亂順序
+    const rand = mulberry32(555);
+    const survived = scanned.filter(() => rand() >= 0.40);
+    for (let i = survived.length - 1; i > 0; i--) {
+      const j = Math.floor(rand() * (i + 1));
+      [survived[i], survived[j]] = [survived[j], survived[i]];
+    }
+
+    // 接收端：收到 metadata 之前先暫存資料幀
+    let dec = null; const buffered = [];
+    for (const text of survived) {
+      const bytes = base45Decode(text); if (!bytes) continue;
+      const pkt = decodePacketV2(bytes); if (!pkt) continue;
+      if (!dec) {
+        if (!pkt.isMetadata) { buffered.push(pkt); continue; }
+        const m = JSON.parse(new TextDecoder().decode(pkt.payload));
+        dec = new LTDecoder2({ sessionId: pkt.sessionId, K: pkt.K, blockSize: m.blockSize, fileSize: m.size });
+        dec.addPacket(pkt);
+        for (const b of buffered) dec.addPacket(b);
+        buffered.length = 0;
+        continue;
+      }
+      dec.addPacket(pkt);
+      if (dec.isComplete) break;
+    }
+    return { dec, renderFail, scanned: scanned.length, survived: survived.length, K: enc.K };
+  }
+
+  // --- (a) 全程隨機編碼區塊 ---
+  const r1 = await runOnce(false);
+  check('每一幀畫出來的碼都能全數掃回', r1.renderFail === 0,
+    `${r1.scanned} 個碼，失敗 ${r1.renderFail} 幀`);
+  check('模擬通道：丟 40% 並打亂順序', true, `${r1.scanned} → ${r1.survived} 個碼`);
+  check('（全程隨機編碼）完成還原', r1.dec && r1.dec.isComplete,
+    r1.dec ? `解出 ${r1.dec.solvedCount}/${r1.dec.K}` : '沒收到 metadata');
+  if (r1.dec && r1.dec.isComplete) {
+    const file = r1.dec.getFile();
+    check('內容與原檔逐位元組相同', file.length === fileSize && file.every((v, i) => v === data[i]));
+    check('SHA-256 驗證通過', sha256Hex(file) === hash, hash.slice(0, 24) + '…');
+    const ov = r1.dec.stats.accepted / r1.dec.K;
+    check('解碼開銷 ≤ 1.05×（驗收目標）', ov <= 1.05,
+      `${ov.toFixed(3)}×（高斯消去 ${r1.dec.stats.eliminations} 次，解出 ${r1.dec.stats.elimSolved} 塊）`);
+  }
+
+  // --- (b) 系統區塊優先，對照組 ---
+  const r2 = await runOnce(true);
+  check('（系統區塊優先）同樣能完整還原', r2.dec && r2.dec.isComplete && sha256Hex(r2.dec.getFile()) === hash);
+  if (r2.dec && r2.dec.isComplete) {
+    const ov2 = r2.dec.stats.accepted / r2.dec.K;
+    const ov1 = r1.dec.stats.accepted / r1.dec.K;
+    info('兩種模式的開銷比較',
+      `系統區塊優先 ${ov2.toFixed(3)}× vs 全程隨機 ${ov1.toFixed(3)}×`);
+    info('為什麼系統區塊在有漏幀時反而較差',
+      '漏掉的系統區塊要靠隨機區塊補，但那些隨機區塊的度數分布是針對整個 K 設計的，'
+      + '化簡掉已知區塊後有相當比例變成度數 0，形成線性相依');
+  }
+}
+
+/* ------------------------------------------------------------------ */
+async function testThroughput() {
+  section('4. 吞吐量（zxing-wasm 解碼一幀的成本）');
+  info('說明', '在 1920×1080 的畫面中放入一個網格，量測一次 readBarcodes 的耗時');
+
+  const cv = document.createElement('canvas');
+  const frame = document.createElement('canvas');
+  frame.width = 1920; frame.height = 1080;
+  const fctx = frame.getContext('2d', { alpha: false, willReadFrequently: true });
+
+  for (const [cols, rows, version] of [[1, 1, 20], [2, 2, 15], [3, 2, 15], [3, 3, 15], [3, 3, 20]]) {
+    const n = cols * rows;
+    const { blockSize } = blockSizeForVersion(qrcode, version, 'L');
+    const texts = Array.from({ length: n }, (_, i) => base45Encode(makeData(blockSize, i + version)));
+    renderGrid(cv, texts, version, 'L', cols, rows, 4);
+
+    // 把網格等比放進 1080p 畫面，佔滿高度的 90%
+    fctx.fillStyle = '#c8c8c8'; fctx.fillRect(0, 0, 1920, 1080);
+    const s = (1080 * 0.9) / Math.max(cv.width, cv.height);
+    const w = cv.width * s, h = cv.height * s;
+    fctx.imageSmoothingEnabled = true; fctx.imageSmoothingQuality = 'medium';
+    fctx.drawImage(cv, (1920 - w) / 2, (1080 - h) / 2, w, h);
+
+    const t0 = performance.now();
+    let got = [];
+    for (let i = 0; i < 3; i++) got = await scan(frame, n);
+    const ms = (performance.now() - t0) / 3;
+    const maxFps = 1000 / ms;
+    const kbps = blockSize * n * Math.min(maxFps, 15) / 1024;
+
+    check(`${cols}×${rows} / v${version}：1080p 畫面能解出全部 ${n} 個碼`, got.length === n,
+      `${ms.toFixed(0)} ms/幀 → 上限 ${maxFps.toFixed(1)} FPS，理論吞吐 ${kbps.toFixed(1)} KB/s`);
+    await yieldUI();
+  }
+}
+
+/* ------------------------------------------------------------------ */
+async function testRGB() {
+  section('5. RGB 三通道模式（實驗性）');
+
+  const version = 15, cols = 2, rows = 2;
+  const { blockSize } = blockSizeForVersion(qrcode, version, 'L');
+  const cv = document.getElementById('rgbCanvas');
+
+  // 用和 encoder-worker 相同的方式合成：三個碼分別放進 R/G/B
+  const byCh = [0, 1, 2].map(ch =>
+    Array.from({ length: cols * rows }, (_, i) => base45Encode(makeData(blockSize, ch * 100 + i))));
+  const qrs = byCh.map(list => list.map(t => { const q = qrcode(version, 'L'); q.addData(t, 'Alphanumeric'); q.make(); return q; }));
+  const m = qrs[0][0].getModuleCount(), cell = m + QUIET * 2;
+  const W = cell * cols, H = cell * rows, scale = 4;
+  cv.width = W * scale; cv.height = H * scale;
+
+  const tmp = document.createElement('canvas');
+  tmp.width = W; tmp.height = H;
+  const tctx = tmp.getContext('2d', { alpha: false, willReadFrequently: true });
+  const img = tctx.createImageData(W, H);
+  img.data.fill(255);
+  for (let ch = 0; ch < 3; ch++) {
+    qrs[ch].forEach((q, idx) => {
+      const gx = (idx % cols) * cell, gy = ((idx / cols) | 0) * cell;
+      for (let r = 0; r < m; r++) for (let c = 0; c < m; c++)
+        if (q.isDark(r, c)) img.data[((gy + QUIET + r) * W + (gx + QUIET + c)) * 4 + ch] = 0;
+    });
+  }
+  for (let i = 3; i < img.data.length; i += 4) img.data[i] = 255;
+  tctx.putImageData(img, 0, 0);
+  const cctx = cv.getContext('2d', { alpha: false, willReadFrequently: true });
+  cctx.imageSmoothingEnabled = false;
+  cctx.drawImage(tmp, 0, 0, cv.width, cv.height);
+
+  check('RGB 幀合成成功', cv.width > 0, `${cv.width}×${cv.height}，一幀 ${cols * rows * 3} 個碼`);
+
+  // 拆通道 → 二值化 → 解碼
+  const full = cctx.getImageData(0, 0, cv.width, cv.height);
+  let totalOk = 0;
+  for (let ch = 0; ch < 3; ch++) {
+    const bin = new ImageData(cv.width, cv.height);
+    for (let i = 0, p = ch; i < cv.width * cv.height; i++, p += 4) {
+      const v = full.data[p] < 128 ? 0 : 255;      // 無壓縮的理想情況用固定門檻即可
+      bin.data[i * 4] = v; bin.data[i * 4 + 1] = v; bin.data[i * 4 + 2] = v; bin.data[i * 4 + 3] = 255;
+    }
+    const got = (await readBarcodes(bin, { formats: ['QRCode'], maxNumberOfSymbols: cols * rows })).map(x => x.text);
+    const ok = byCh[ch].every(t => got.includes(t));
+    if (ok) totalOk++;
+    check(`通道 ${'RGB'[ch]} 拆解後解出 ${got.length}/${cols * rows} 個`, ok);
+    await yieldUI();
+  }
+  check('三個通道都能獨立還原（無壓縮的理想情況）', totalOk === 3,
+    `一幀承載 ${cols * rows * 3 * blockSize} bytes = 黑白模式的 3 倍`);
+  info('提醒', '這是在畫布上直接拆通道的理想結果；真實相機有色度次取樣與色偏，未經實機驗證');
+}
+
+/* ------------------------------------------------------------------ */
+(async () => {
+  const t0 = performance.now();
+  try {
+    await testBase45QR();
+    await testMultiCode();
+    await testEndToEnd();
+    await testThroughput();
+    await testRGB();
+  } catch (e) {
+    check('測試過程發生未預期的例外', false, e.message);
+    console.error(e);
+  }
+  const el = ((performance.now() - t0) / 1000).toFixed(1);
+  const s = document.getElementById('summary');
+  s.className = failed === 0 ? 'ok' : 'bad';
+  s.textContent = failed === 0 ? `✅ 全部 ${passed} 項通過（耗時 ${el} 秒）`
+                               : `❌ ${passed} 項通過、${failed} 項失敗（耗時 ${el} 秒）`;
+  window.__TEST_RESULT__ = { passed, failed, done: true };
+})();
+</script>
+</body>
+</html>

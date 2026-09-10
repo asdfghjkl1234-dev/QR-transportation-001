@@ -1,0 +1,660 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>QR 串流傳檔 v2 — 接收端</title>
+<style>
+  :root {
+    --bg:#0d0f14; --panel:#151922; --panel2:#0f1219; --border:#242a36;
+    --text:#e8ecf3; --muted:#98a2b4; --accent:#5b9dff; --accent2:#7c5cff;
+    --ok:#3ddc97; --warn:#ffbe4d; --danger:#ff6b6b;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text);
+         font:14px/1.6 system-ui,-apple-system,"Noto Sans TC","Microsoft JhengHei",sans-serif; }
+  .wrap { max-width:760px; margin:0 auto; padding:20px 16px 48px; }
+  h1 { font-size:19px; margin:0 0 2px; }
+  h1 .tag { font-size:11px; padding:2px 8px; border-radius:999px; vertical-align:middle;
+            background:linear-gradient(90deg,var(--accent),var(--accent2)); color:#fff; margin-left:8px; }
+  .sub { color:var(--muted); font-size:13px; margin:0 0 16px; }
+  .sub a { color:var(--accent); }
+
+  .card { background:var(--panel); border:1px solid var(--border); border-radius:12px; padding:16px; }
+  .card + .card { margin-top:14px; }
+  .card h2 { font-size:12px; text-transform:uppercase; letter-spacing:.07em; color:var(--muted);
+             margin:0 0 12px; font-weight:600; }
+
+  button.btn{padding:10px 16px;border-radius:9px;border:1px solid var(--border);background:var(--panel2);
+             color:var(--text);cursor:pointer;font-size:14px}
+  button.btn:hover:not(:disabled){border-color:var(--accent)}
+  button.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+  button.btn.small{padding:6px 12px;font-size:13px}
+  button.btn:disabled{opacity:.4;cursor:not-allowed}
+  .buttons{display:flex;gap:8px;flex-wrap:wrap}
+
+  #camWrap{position:relative;background:#000;border-radius:10px;overflow:hidden;aspect-ratio:4/3}
+  #video{width:100%;height:100%;object-fit:cover;display:block}
+  #overlay{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
+  #camIdle{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+           color:var(--muted);font-size:13px;text-align:center;padding:20px}
+
+  .bar{height:10px;background:#0a0c11;border-radius:999px;overflow:hidden;margin:6px 0 10px}
+  .bar>div{height:100%;width:0%;background:linear-gradient(90deg,var(--accent),var(--ok));transition:width .18s}
+  .barTop{display:flex;justify-content:space-between;font-size:13px}
+  .barTop b{font-variant-numeric:tabular-nums}
+
+  .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(104px,1fr));gap:9px}
+  .stat{background:var(--panel2);border-radius:9px;padding:8px 10px}
+  .stat .lbl{color:var(--muted);font-size:11px}
+  .stat .num{font-size:16px;font-weight:600;font-variant-numeric:tabular-nums}
+  .stat.bad .num{color:var(--danger)}
+
+  .kv{display:grid;grid-template-columns:auto 1fr;gap:3px 14px;font-size:13px}
+  .kv dt{color:var(--muted)} .kv dd{margin:0;word-break:break-all}
+
+  .note{border-radius:9px;padding:10px 12px;font-size:12.5px;margin-top:12px}
+  .note.info{background:rgba(91,157,255,.1);border:1px solid rgba(91,157,255,.32);color:var(--accent)}
+  .note.ok{background:rgba(61,220,151,.1);border:1px solid rgba(61,220,151,.35);color:var(--ok)}
+  .note.warn{background:rgba(255,190,77,.1);border:1px solid rgba(255,190,77,.35);color:var(--warn)}
+  .note.err{background:rgba(255,107,107,.1);border:1px solid rgba(255,107,107,.35);color:var(--danger)}
+  .note .buttons{margin-top:10px}
+  .hidden{display:none !important}
+
+  #preview img,#preview video{max-width:100%;border-radius:9px;display:block;background:#000}
+  .badge{display:inline-block;font-size:11px;padding:2px 7px;border-radius:999px;background:var(--panel2);
+         color:var(--muted);border:1px solid var(--border)}
+  .check{display:flex;gap:8px;align-items:center;font-size:13px;cursor:pointer;margin-top:10px}
+  .check input{accent-color:var(--accent)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>QR 串流傳檔 — 接收端<span class="tag">v2 高速版</span></h1>
+  <p class="sub">
+    對準 <a href="sender.html">v2 的 sender.html</a> 畫面持續掃描。
+    <a href="../receiver.html" style="color:var(--muted)">（v1 在這裡）</a><br>
+    <span class="badge" id="engineBadge">解碼引擎：偵測中…</span>
+  </p>
+
+  <div class="card">
+    <div id="camWrap">
+      <video id="video" playsinline muted></video>
+      <canvas id="overlay"></canvas>
+      <div id="camIdle">按下「開啟相機」開始掃描<br>（手機需要 HTTPS 或 localhost）</div>
+    </div>
+    <div class="buttons" style="margin-top:12px">
+      <button class="btn primary" id="btnStart">開啟相機</button>
+      <button class="btn" id="btnStop" disabled>停止</button>
+      <button class="btn" id="btnReset" disabled>清除已收資料</button>
+    </div>
+    <label class="check">
+      <input type="checkbox" id="rgbOpt">
+      <span>RGB 三通道模式 <span class="badge">實驗性</span>（發送端有開才勾）</span>
+    </label>
+    <div id="camErr" class="note err hidden"></div>
+    <div id="sessionAsk" class="note warn hidden"></div>
+    <div id="qualityTip" class="note warn hidden"></div>
+  </div>
+
+  <div class="card">
+    <h2>接收進度</h2>
+    <div class="barTop">
+      <span id="pLabel">等待第一個封包…</span>
+      <b id="pPct">0%</b>
+    </div>
+    <div class="bar"><div id="pBar"></div></div>
+
+    <div class="stats">
+      <div class="stat"><div class="lbl">有效封包/秒</div><div class="num" id="sPps">0</div></div>
+      <div class="stat"><div class="lbl">即時吞吐</div><div class="num" id="sKbps">0</div></div>
+      <div class="stat"><div class="lbl">CRC 失敗率</div><div class="num" id="sCrc">0%</div></div>
+      <div class="stat"><div class="lbl">預估剩餘</div><div class="num" id="sEta">—</div></div>
+      <div class="stat"><div class="lbl">有效封包</div><div class="num" id="sValid">0</div></div>
+      <div class="stat"><div class="lbl">重複</div><div class="num" id="sDup">0</div></div>
+      <div class="stat"><div class="lbl">掃描幀/秒</div><div class="num" id="sScan">0</div></div>
+      <div class="stat"><div class="lbl">解碼耗時</div><div class="num" id="sMs">—</div></div>
+    </div>
+
+    <div id="metaBox" class="hidden" style="margin-top:14px">
+      <dl class="kv">
+        <dt>檔名</dt><dd id="mName">—</dd>
+        <dt>類型</dt><dd id="mType">—</dd>
+        <dt>大小</dt><dd id="mSize">—</dd>
+      </dl>
+    </div>
+  </div>
+
+  <div class="card hidden" id="resultCard">
+    <h2>接收結果</h2>
+    <div id="resultNote"></div>
+    <div id="preview" style="margin:12px 0"></div>
+    <div class="buttons">
+      <a id="btnDownload" class="btn primary" download>下載檔案</a>
+      <button class="btn" id="btnAgain">再接收一次</button>
+    </div>
+  </div>
+</div>
+
+<script type="module">
+import { base45Decode, decodePacketV2, LTDecoder2, sha256Hex } from './fountain2.js';
+
+const $ = (id) => document.getElementById(id);
+
+/* =====================================================================
+ * 狀態
+ * ===================================================================== */
+const S = {
+  stream: null, scanning: false, finished: false,
+  engine: '', detector: null,
+  pool: [], jobId: 0, poolReady: 0,          // zxing worker 工作池
+  decoder: null, pendingPackets: [],          // 還沒收到 metadata 前先暫存
+  sessionId: null, ignoredSession: null, pendingSession: null,
+  validPackets: 0, crcFail: 0, totalCodes: 0,
+  rateWindow: [], byteWindow: [],
+  scanWindow: [], lastMs: 0,
+  boxes: [], objectUrl: null, rafId: 0,
+  rgb: false, maxSymbols: 9,
+  tipShownAt: 0,
+};
+
+const fmtBytes = (n) => n < 1024 ? `${n} B`
+  : n < 1048576 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1048576).toFixed(2)} MB`;
+const fmtDur = (s) => !isFinite(s) || s < 0 ? '—' : s < 60 ? `${Math.ceil(s)} 秒`
+  : `${Math.floor(s / 60)} 分 ${Math.round(s % 60)} 秒`;
+
+function showNote(id, cls, html) {
+  const el = $(id);
+  if (!html) { el.classList.add('hidden'); return; }
+  el.className = `note ${cls}`; el.innerHTML = html; el.classList.remove('hidden');
+}
+
+/* =====================================================================
+ * 解碼引擎
+ * =====================================================================
+ * 1. 原生 BarcodeDetector：detect() 本來就會回傳畫面中的所有碼，
+ *    正好符合 v2「一幀多碼」的需求，而且速度遠快於 wasm。
+ * 2. 退路：zxing-wasm，用 maxNumberOfSymbols 一次解出多個碼，
+ *    並開 2～4 個 worker 組成工作池分擔負載。
+ */
+async function initEngine() {
+  if ('BarcodeDetector' in window) {
+    try {
+      const formats = await window.BarcodeDetector.getSupportedFormats();
+      if (formats.includes('qr_code')) {
+        S.detector = new window.BarcodeDetector({ formats: ['qr_code'] });
+        S.engine = 'native';
+        $('engineBadge').textContent = '解碼引擎：原生 BarcodeDetector（多碼、最快）';
+        return;
+      }
+    } catch { /* 建立失敗就往下用 zxing */ }
+  }
+
+  // 依裝置核心數決定工作池大小，夾在 2～4 之間
+  const size = Math.max(2, Math.min(4, (navigator.hardwareConcurrency || 4) - 1));
+  for (let i = 0; i < size; i++) {
+    const w = new Worker(new URL('./decoder-worker.js', import.meta.url), { type: 'module' });
+    const slot = { worker: w, busy: false };
+    w.onmessage = (e) => {
+      const m = e.data;
+      if (m.type === 'ready') { S.poolReady++; return; }
+      if (m.type === 'result') { slot.busy = false; onCodes(m.codes, m.ms); }
+    };
+    w.onerror = () => {
+      slot.busy = false;
+      showNote('camErr', 'err', 'zxing-wasm 載入失敗，請重新整理頁面。');
+    };
+    S.pool.push(slot);
+  }
+  S.engine = 'zxing';
+  $('engineBadge').textContent = `解碼引擎：zxing-wasm（${size} 個 Worker 工作池）`;
+}
+
+/* =====================================================================
+ * 相機
+ * ===================================================================== */
+async function startCamera() {
+  showNote('camErr', 'err', '');
+  try {
+    S.stream = await navigator.mediaDevices.getUserMedia({
+      video: {
+        facingMode: { ideal: 'environment' },
+        width: { ideal: 1920 }, height: { ideal: 1080 },
+        frameRate: { ideal: 60, min: 30 },
+      },
+      audio: false,
+    });
+  } catch (e) {
+    let msg = `無法開啟相機：${e.name}`;
+    if (e.name === 'NotAllowedError') msg = '相機權限被拒絕，請在瀏覽器設定中允許後再試。';
+    else if (e.name === 'NotFoundError') msg = '找不到相機裝置。';
+    else if (!window.isSecureContext) {
+      msg = '這個頁面不是安全來源（HTTPS 或 localhost），瀏覽器不允許存取相機。'
+          + '請用 HTTPS 部署，或參考 README 的 cloudflared 通道做法。';
+    }
+    showNote('camErr', 'err', msg);
+    return;
+  }
+
+  const video = $('video');
+  video.srcObject = S.stream;
+  await video.play();
+
+  const track = S.stream.getVideoTracks()[0];
+  await lockFocusExposure(track);
+
+  const st = track.getSettings();
+  $('camIdle').classList.add('hidden');
+  $('engineBadge').textContent += `　·　${st.width}×${st.height}@${st.frameRate ? Math.round(st.frameRate) : '?'}fps`;
+
+  $('btnStart').disabled = true; $('btnStop').disabled = false; $('btnReset').disabled = false;
+  S.rgb = $('rgbOpt').checked;
+  S.scanning = true;
+  scheduleScan();
+}
+
+/**
+ * 鎖定對焦與曝光。
+ * 相機的自動對焦會不斷來回搜尋，每次搜尋期間畫面都是糊的，
+ * 對高密度 QR 來說那幾幀全部報廢。能鎖就鎖，鎖不了也不影響功能。
+ */
+async function lockFocusExposure(track) {
+  if (!track.getCapabilities) return;
+  let caps = {};
+  try { caps = track.getCapabilities() || {}; } catch { return; }
+  const advanced = [];
+
+  // continuous 通常比 manual 實際：manual 還要自己給 focusDistance，
+  // 而且多數裝置根本不支援 manual。
+  if (caps.focusMode?.includes('continuous')) advanced.push({ focusMode: 'continuous' });
+  else if (caps.focusMode?.includes('manual')) advanced.push({ focusMode: 'manual' });
+  if (caps.exposureMode?.includes('continuous')) advanced.push({ exposureMode: 'continuous' });
+  else if (caps.exposureMode?.includes('manual')) advanced.push({ exposureMode: 'manual' });
+
+  if (!advanced.length) return;
+  try { await track.applyConstraints({ advanced }); }
+  catch { /* 裝置不支援就算了，功能不受影響 */ }
+}
+
+function stopCamera() {
+  S.scanning = false;
+  cancelAnimationFrame(S.rafId);
+  if (S.stream) { S.stream.getTracks().forEach((t) => t.stop()); S.stream = null; }
+  $('video').srcObject = null;
+  $('camIdle').classList.remove('hidden');
+  $('btnStart').disabled = false; $('btnStop').disabled = true;
+  clearOverlay();
+}
+
+/* =====================================================================
+ * 擷取迴圈
+ * ===================================================================== */
+function scheduleScan() {
+  if (!S.scanning) return;
+  const v = $('video');
+  if (v.requestVideoFrameCallback) v.requestVideoFrameCallback(() => scanFrame());
+  else S.rafId = requestAnimationFrame(() => scanFrame());
+}
+
+async function scanFrame() {
+  if (!S.scanning) return;
+  const video = $('video');
+  if (video.readyState < 2) { scheduleScan(); return; }
+
+  const now = performance.now();
+  S.scanWindow.push(now);
+  while (S.scanWindow.length && now - S.scanWindow[0] > 1000) S.scanWindow.shift();
+  $('sScan').textContent = S.scanWindow.length;
+
+  if (S.engine === 'native') {
+    try {
+      const t0 = performance.now();
+      const codes = await S.detector.detect(video);
+      onCodes(codes.map((c) => ({
+        text: c.rawValue,
+        channel: 0,
+        position: c.cornerPoints && c.cornerPoints.length === 4 ? {
+          tl: [c.cornerPoints[0].x, c.cornerPoints[0].y],
+          tr: [c.cornerPoints[1].x, c.cornerPoints[1].y],
+          br: [c.cornerPoints[2].x, c.cornerPoints[2].y],
+          bl: [c.cornerPoints[3].x, c.cornerPoints[3].y],
+        } : null,
+      })), performance.now() - t0);
+    } catch { /* 偶發偵測失敗，略過 */ }
+  } else {
+    // 找一個閒置的 worker；全部忙碌就直接丟掉這一幀
+    const slot = S.pool.find((s) => !s.busy);
+    if (slot) {
+      slot.busy = true;
+      try {
+        const bitmap = await createImageBitmap(video);
+        slot.worker.postMessage(
+          { bitmap, maxSymbols: S.maxSymbols, rgb: S.rgb, jobId: ++S.jobId },
+          [bitmap],   // 轉移所有權，不複製像素
+        );
+      } catch { slot.busy = false; }
+    }
+  }
+
+  scheduleScan();
+}
+
+/* =====================================================================
+ * 處理解出來的碼
+ * ===================================================================== */
+function onCodes(codes, ms) {
+  if (ms != null) { S.lastMs = ms; $('sMs').textContent = `${ms.toFixed(0)} ms`; }
+  if (!codes || !codes.length) { drawOverlay([]); return; }
+  if (S.finished) return;
+
+  const boxes = [];
+  for (const c of codes) {
+    S.totalCodes++;
+    const ok = handleText(c.text);
+    if (c.position) boxes.push({ pos: c.position, ok });
+  }
+  drawOverlay(boxes);
+  updateStats();
+}
+
+/**
+ * 處理單一個 QR 的內容。
+ * @returns {boolean} 是否為本協定且通過 CRC
+ */
+function handleText(text) {
+  const bytes = base45Decode(text);
+  if (!bytes) { S.crcFail++; return false; }
+  const pkt = decodePacketV2(bytes);
+  if (!pkt) { S.crcFail++; return false; }     // CRC 或格式不符
+
+  // --- session 判斷 ---
+  if (S.sessionId === null) {
+    S.sessionId = pkt.sessionId;
+  } else if (pkt.sessionId !== S.sessionId) {
+    if (pkt.sessionId === S.ignoredSession) return true;
+    if (!S.pendingSession) askNewSession(pkt);
+    return true;
+  }
+
+  // --- metadata 之前先把資料幀存起來 ---
+  if (!S.decoder) {
+    if (!pkt.isMetadata) {
+      // 精簡標頭沒有 blockSize，必須等 metadata 才知道怎麼切
+      if (S.pendingPackets.length < 4000) S.pendingPackets.push(pkt);
+      S.validPackets++;
+      countBytes(pkt.payload.length);
+      return true;
+    }
+    let meta;
+    try { meta = JSON.parse(new TextDecoder().decode(pkt.payload)); }
+    catch { S.crcFail++; return false; }
+
+    S.decoder = new LTDecoder2({
+      sessionId: pkt.sessionId, K: pkt.K,
+      blockSize: meta.blockSize, fileSize: meta.size,
+    });
+    S.decoder.addPacket(pkt);
+    // 把暫存的資料幀一次補進去
+    for (const p of S.pendingPackets) S.decoder.addPacket(p);
+    S.pendingPackets.length = 0;
+    updateMeta();
+    checkDone();
+    return true;
+  }
+
+  const r = S.decoder.addPacket(pkt);
+  if (r.accepted) {
+    S.validPackets++;
+    countBytes(pkt.payload.length);
+    if (pkt.isMetadata) updateMeta();
+  }
+  checkDone();
+  return true;
+}
+
+/** 記錄一個有效封包的時間與位元組數，用來算即時速率 */
+function countBytes(n) {
+  const now = performance.now();
+  S.rateWindow.push(now);
+  S.byteWindow.push({ t: now, n });
+  while (S.rateWindow.length && now - S.rateWindow[0] > 3000) S.rateWindow.shift();
+  while (S.byteWindow.length && now - S.byteWindow[0].t > 3000) S.byteWindow.shift();
+}
+
+function checkDone() {
+  if (S.decoder && S.decoder.isComplete && S.decoder.metadata) finish();
+}
+
+/* =====================================================================
+ * 疊圖：在偵測到的 QR 位置畫框
+ * ===================================================================== */
+const overlay = $('overlay');
+const octx = overlay.getContext('2d');
+
+function clearOverlay() { octx.clearRect(0, 0, overlay.width, overlay.height); }
+
+function drawOverlay(boxes) {
+  const video = $('video');
+  const vw = video.videoWidth, vh = video.videoHeight;
+  if (!vw || !vh) return;
+
+  const rect = video.getBoundingClientRect();
+  if (overlay.width !== rect.width || overlay.height !== rect.height) {
+    overlay.width = rect.width; overlay.height = rect.height;
+  }
+  octx.clearRect(0, 0, overlay.width, overlay.height);
+  if (!boxes.length) return;
+
+  // video 使用 object-fit: cover，所以要用「較大的縮放比」並置中裁切，
+  // 才能把影像座標正確換算成畫面座標
+  const scale = Math.max(overlay.width / vw, overlay.height / vh);
+  const offX = (overlay.width - vw * scale) / 2;
+  const offY = (overlay.height - vh * scale) / 2;
+  const toX = (x) => x * scale + offX;
+  const toY = (y) => y * scale + offY;
+
+  octx.lineWidth = 3;
+  for (const b of boxes) {
+    octx.strokeStyle = b.ok ? '#3ddc97' : '#ff6b6b';   // 綠=解碼成功、紅=CRC 失敗
+    const p = b.pos;
+    octx.beginPath();
+    octx.moveTo(toX(p.tl[0]), toY(p.tl[1]));
+    octx.lineTo(toX(p.tr[0]), toY(p.tr[1]));
+    octx.lineTo(toX(p.br[0]), toY(p.br[1]));
+    octx.lineTo(toX(p.bl[0]), toY(p.bl[1]));
+    octx.closePath();
+    octx.stroke();
+  }
+}
+
+/* =====================================================================
+ * 統計與提示
+ * ===================================================================== */
+function updateStats() {
+  const d = S.decoder;
+  if (d) {
+    const pct = d.progress * 100;
+    $('pBar').style.width = `${pct.toFixed(1)}%`;
+    $('pPct').textContent = `${pct.toFixed(1)}%`;
+    $('pLabel').textContent = `已解出 ${d.solvedCount} / ${d.K} 個區塊`;
+    $('sDup').textContent = d.stats.duplicate;
+  } else if (S.pendingPackets.length) {
+    $('pLabel').textContent = `已暫存 ${S.pendingPackets.length} 個封包，等待 metadata…`;
+  }
+
+  $('sValid').textContent = S.validPackets;
+
+  const pps = S.rateWindow.length / 3;
+  $('sPps').textContent = pps.toFixed(1);
+
+  const bytes = S.byteWindow.reduce((a, b) => a + b.n, 0);
+  $('sKbps').textContent = `${(bytes / 3 / 1024).toFixed(1)}`;
+
+  const rate = S.totalCodes ? S.crcFail / S.totalCodes : 0;
+  const crcEl = $('sCrc');
+  crcEl.textContent = `${(rate * 100).toFixed(0)}%`;
+  crcEl.parentElement.classList.toggle('bad', rate > 0.3);
+
+  // 剩餘時間：用「還缺幾個區塊 ÷ 每秒收到幾個有效封包」估算
+  if (d && pps > 0.2) {
+    const need = Math.max(0, Math.ceil(d.K * 1.05) - d.stats.accepted);
+    $('sEta').textContent = fmtDur(need / pps);
+  }
+
+  // CRC 失敗率長時間偏高就給建議
+  if (S.totalCodes > 60 && rate > 0.3) {
+    if (!S.tipShownAt) S.tipShownAt = performance.now();
+    if (performance.now() - S.tipShownAt > 3000) {
+      showNote('qualityTip', 'warn',
+        `⚠️ CRC 失敗率 ${(rate * 100).toFixed(0)}%，代表很多碼掃到了但內容是壞的。`
+        + `建議在發送端<b>降低網格數、FPS 或 QR 版本</b>，或是把手機拿近一點、讓畫面填滿更多視野。`);
+    }
+  } else {
+    S.tipShownAt = 0;
+    showNote('qualityTip', 'warn', '');
+  }
+}
+
+function updateMeta() {
+  const d = S.decoder;
+  if (!d) return;
+  $('metaBox').classList.remove('hidden');
+  if (d.metadata) {
+    $('mName').textContent = d.metadata.name || '（未提供）';
+    $('mType').textContent = d.metadata.type || '（未提供）';
+    $('mSize').textContent = `${fmtBytes(d.metadata.size)}（${d.K} 塊 × ${d.blockSize} B）`;
+  }
+}
+
+/* =====================================================================
+ * session 切換
+ * ===================================================================== */
+function askNewSession(pkt) {
+  S.pendingSession = pkt;
+  const pct = S.decoder ? Math.round(S.decoder.progress * 100) : 0;
+  showNote('sessionAsk', 'warn',
+    `偵測到<b>新的傳輸階段</b>（sessionId ${pkt.sessionId.toString(16)}）。目前這份已收到 ${pct}%，要改收新的嗎？`
+    + `<div class="buttons">
+         <button class="btn small primary" id="askYes">改收新的</button>
+         <button class="btn small" id="askNo">繼續收目前這份</button>
+       </div>`);
+  $('askYes').onclick = () => {
+    const p = S.pendingSession;
+    resetReception();
+    S.sessionId = p.sessionId;
+    handleTextPacket(p);
+  };
+  $('askNo').onclick = () => {
+    S.ignoredSession = pkt.sessionId;
+    S.pendingSession = null;
+    showNote('sessionAsk', 'warn', '');
+  };
+}
+
+/** 直接把一個已解析的封包送進流程（session 切換後用） */
+function handleTextPacket(pkt) {
+  if (pkt.isMetadata) {
+    try {
+      const meta = JSON.parse(new TextDecoder().decode(pkt.payload));
+      S.decoder = new LTDecoder2({
+        sessionId: pkt.sessionId, K: pkt.K, blockSize: meta.blockSize, fileSize: meta.size,
+      });
+      S.decoder.addPacket(pkt);
+      updateMeta();
+    } catch { /* 壞的 metadata 就忽略 */ }
+  } else {
+    S.pendingPackets.push(pkt);
+  }
+  updateStats();
+}
+
+/* =====================================================================
+ * 完成
+ * ===================================================================== */
+function finish() {
+  S.finished = true;
+  const d = S.decoder;
+  const file = d.getFile();
+  const meta = d.metadata;
+
+  const actual = sha256Hex(file);
+  const ok = actual === meta.sha256;
+  const type = meta.type || 'application/octet-stream';
+  const blob = new Blob([file.slice()], { type });
+  if (S.objectUrl) URL.revokeObjectURL(S.objectUrl);
+  S.objectUrl = URL.createObjectURL(blob);
+
+  $('resultCard').classList.remove('hidden');
+  const overhead = ((d.stats.accepted / d.K - 1) * 100).toFixed(1);
+  if (ok) {
+    showNote('resultNote', 'ok',
+      `✅ 接收完成，SHA-256 驗證通過。<br>`
+      + `共 ${S.validPackets} 個有效封包，解出 ${d.K} 個區塊（開銷 +${overhead}%，`
+      + `其中 ${d.stats.elimSolved} 塊由高斯消去法解出）。`);
+  } else {
+    showNote('resultNote', 'err',
+      `⚠️ SHA-256 <b>不相符</b>，檔案可能有損毀。<br>`
+      + `預期 <code>${meta.sha256.slice(0, 16)}…</code>，實際 <code>${actual.slice(0, 16)}…</code><br>`
+      + `下方仍可下載（未經驗證），建議按「再接收一次」重掃。`);
+  }
+
+  const preview = $('preview');
+  preview.innerHTML = '';
+  if (type.startsWith('image/')) {
+    const img = document.createElement('img'); img.src = S.objectUrl; preview.appendChild(img);
+  } else if (type.startsWith('video/')) {
+    const v = document.createElement('video');
+    v.src = S.objectUrl; v.controls = true; v.playsInline = true; preview.appendChild(v);
+  } else {
+    preview.innerHTML = `<span class="badge">${type} — 沒有內建預覽，請直接下載</span>`;
+  }
+
+  const a = $('btnDownload');
+  a.href = S.objectUrl;
+  a.download = meta.name || 'received.bin';
+  stopCamera();
+}
+
+/* =====================================================================
+ * 重置
+ * ===================================================================== */
+function resetReception() {
+  S.decoder = null; S.pendingPackets = [];
+  S.sessionId = null; S.ignoredSession = null; S.pendingSession = null;
+  S.validPackets = 0; S.crcFail = 0; S.totalCodes = 0; S.finished = false;
+  S.rateWindow = []; S.byteWindow = []; S.tipShownAt = 0;
+  if (S.objectUrl) { URL.revokeObjectURL(S.objectUrl); S.objectUrl = null; }
+
+  $('resultCard').classList.add('hidden');
+  $('preview').innerHTML = '';
+  $('metaBox').classList.add('hidden');
+  $('pBar').style.width = '0%'; $('pPct').textContent = '0%';
+  $('pLabel').textContent = '等待第一個封包…';
+  for (const [id, v] of [['sValid','0'],['sDup','0'],['sPps','0'],['sKbps','0'],['sCrc','0%'],['sEta','—']]) $(id).textContent = v;
+  $('sCrc').parentElement.classList.remove('bad');
+  showNote('sessionAsk', 'warn', '');
+  showNote('qualityTip', 'warn', '');
+  clearOverlay();
+}
+
+/* =====================================================================
+ * 事件
+ * ===================================================================== */
+$('btnStart').addEventListener('click', startCamera);
+$('btnStop').addEventListener('click', stopCamera);
+$('btnReset').addEventListener('click', resetReception);
+$('btnAgain').addEventListener('click', () => { resetReception(); startCamera(); });
+$('rgbOpt').addEventListener('change', (e) => { S.rgb = e.target.checked; });
+
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) S.scanning = false;
+  else if (S.stream && !S.finished) { S.scanning = true; scheduleScan(); }
+});
+
+initEngine();
+
+// 供自動化測試注入模擬掃描結果（不需要真的架相機）。正常使用不會用到。
+window.__injectCodes = (texts) => onCodes(texts.map((t) => ({ text: t, channel: 0, position: null })), 0);
+</script>
+</body>
+</html>

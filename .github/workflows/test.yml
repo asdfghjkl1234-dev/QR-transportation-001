@@ -19,3 +19,6 @@ jobs:
       # 這個專案沒有任何執行期相依套件，所以不需要 npm install
       - name: v1 核心測試
         run: node test.node.mjs
+
+      - name: v2 核心測試
+        run: node v2/test.node.mjs
