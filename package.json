@@ -8,6 +8,7 @@
     "test": "node test.node.mjs",
     "serve": "npx --yes serve -l 8080 .",
     "test:v2": "node v2/test.node.mjs",
-    "test:all": "node test.node.mjs && node v2/test.node.mjs"
+    "test:all": "node test.node.mjs && node v2/test.node.mjs && node v3/test.node.mjs",
+    "test:v3": "node v3/test.node.mjs"
   }
 }

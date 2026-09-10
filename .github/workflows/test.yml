@@ -22,3 +22,6 @@ jobs:
 
       - name: v2 核心測試
         run: node v2/test.node.mjs
+
+      - name: v3 核心測試
+        run: node v3/test.node.mjs
