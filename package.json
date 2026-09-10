@@ -1,0 +1,11 @@
+{
+  "name": "qr-fountain-transfer",
+  "version": "1.0.0",
+  "description": "用 QR 碼串流 + LT 噴泉碼做單向離線傳檔",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "test": "node test.node.mjs",
+    "serve": "npx --yes serve -l 8080 ."
+  }
+}
