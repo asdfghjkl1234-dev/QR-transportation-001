@@ -1,0 +1,402 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>QR 串流傳檔 — 瀏覽器端驗收測試</title>
+
+<!-- 兩個函式庫都採「CDN 優先、本地備份墊底」，和 sender / receiver 一致 -->
+<script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js"></script>
+<script>
+  if (typeof qrcode === 'undefined') {
+    document.write('<scr' + 'ipt src="vendor/qrcode-generator-1.4.4.js"></scr' + 'ipt>');
+  }
+</script>
+<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
+<script>
+  if (typeof jsQR === 'undefined') {
+    document.write('<scr' + 'ipt src="vendor/jsQR-1.4.0.js"></scr' + 'ipt>');
+  }
+</script>
+
+<style>
+  :root { --bg:#0f1115; --panel:#171a21; --border:#262b36; --text:#e6e9ef;
+          --muted:#9aa3b2; --accent:#4f9dff; --ok:#45d483; --danger:#ff6b6b; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); padding:24px 16px 60px;
+         font:14px/1.65 system-ui,-apple-system,"Noto Sans TC","Microsoft JhengHei",sans-serif; }
+  .wrap { max-width: 900px; margin: 0 auto; }
+  h1 { font-size:20px; margin:0 0 4px; }
+  .sub { color:var(--muted); font-size:13px; margin:0 0 20px; }
+  #summary { padding:14px 16px; border-radius:10px; font-weight:600; margin-bottom:18px;
+             background:var(--panel); border:1px solid var(--border); }
+  #summary.ok { border-color:rgba(69,212,131,.5); color:var(--ok); }
+  #summary.bad { border-color:rgba(255,107,107,.5); color:var(--danger); }
+  h2 { font-size:13px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted);
+       margin:22px 0 8px; font-weight:600; }
+  .row { display:flex; gap:10px; padding:5px 10px; border-radius:6px; font-size:13.5px;
+         align-items:baseline; }
+  .row:nth-child(odd) { background:rgba(255,255,255,.02); }
+  .row .mark { flex:none; width:16px; font-weight:700; }
+  .row.pass .mark { color:var(--ok); }
+  .row.fail .mark { color:var(--danger); }
+  .row .detail { color:var(--muted); font-size:12.5px; margin-left:auto; text-align:right;
+                 font-variant-numeric:tabular-nums; }
+  #stageCanvas, #camCanvas { display:block; margin-top:10px; border-radius:8px; max-width:260px; }
+  .peek { display:flex; gap:16px; align-items:flex-start; flex-wrap:wrap; }
+  .peek figcaption { color:var(--muted); font-size:12px; margin-top:6px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>瀏覽器端驗收測試</h1>
+  <p class="sub">
+    這一頁不經過相機，直接在記憶體與 Canvas 上跑完整條鏈路：
+    <b>切塊 → 編碼 → 封包 → base64 → 真的畫成 QR → 真的用 jsQR 解回來 → peeling 解碼 → SHA-256 驗證</b>，
+    並在過程中刻意丟掉 30% 的幀、把順序完全打亂。
+    <br>純邏輯層（PRNG／CRC／SHA-256／LT 碼）的完整測試在 <code>test.node.mjs</code>，用 <code>npm test</code> 執行。
+  </p>
+
+  <div id="summary">測試進行中…</div>
+  <div id="out"></div>
+
+  <div class="peek">
+    <figure style="margin:0">
+      <canvas id="stageCanvas"></canvas>
+      <figcaption>發送端實際畫出來的 QR（最後一幀）</figcaption>
+    </figure>
+    <figure style="margin:0">
+      <canvas id="camCanvas"></canvas>
+      <figcaption>模擬相機重取樣後的畫面</figcaption>
+    </figure>
+  </div>
+</div>
+
+<script type="module">
+import {
+  LTEncoder, LTDecoder, decodePacket, bytesToBase64, base64ToBytes,
+  sha256Hex, mulberry32, selectBlocks, crc32,
+} from './fountain.js';
+
+/* =====================================================================
+ * 測試框架（極簡）
+ * ===================================================================== */
+let passed = 0, failed = 0;
+const out = document.getElementById('out');
+
+function section(title) {
+  const h = document.createElement('h2');
+  h.textContent = title;
+  out.appendChild(h);
+}
+function check(name, ok, detail = '') {
+  ok ? passed++ : failed++;
+  const div = document.createElement('div');
+  div.className = 'row ' + (ok ? 'pass' : 'fail');
+  div.innerHTML = `<span class="mark">${ok ? '✓' : '✗'}</span>
+                   <span>${name}</span>
+                   <span class="detail">${detail}</span>`;
+  out.appendChild(div);
+}
+/** 僅記錄觀測結果，不計入通過／失敗（用來標定門檻，而不是斷言行為） */
+function info(name, detail = '') {
+  const div = document.createElement('div');
+  div.className = 'row';
+  div.innerHTML = `<span class="mark" style="color:var(--muted)">·</span>
+                   <span style="color:var(--muted)">${name}</span>
+                   <span class="detail">${detail}</span>`;
+  out.appendChild(div);
+}
+
+// 讓瀏覽器有機會重繪，測試進行中畫面才不會整個凍住
+const yieldToUI = () => new Promise((r) => setTimeout(r, 0));
+
+/** 固定種子的測試資料，確保每次執行結果一致 */
+function makeTestData(len, seed) {
+  const rand = mulberry32(seed);
+  const a = new Uint8Array(len);
+  for (let i = 0; i < len; i++) a[i] = (rand() * 256) | 0;
+  return a;
+}
+
+/* =====================================================================
+ * 把字串畫成 QR —— 與 sender.html 的 drawQR 使用完全相同的邏輯
+ * ===================================================================== */
+function renderQRToCanvas(canvas, text, ecc, scale) {
+  const qr = qrcode(0, ecc);
+  qr.addData(text, 'Byte');
+  qr.make();
+  const modules = qr.getModuleCount();
+  const QUIET = 4;
+  const size = (modules + QUIET * 2) * scale;
+
+  canvas.width = size; canvas.height = size;
+  const ctx = canvas.getContext('2d', { alpha: false });
+  ctx.imageSmoothingEnabled = false;
+  ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, size, size);
+  ctx.fillStyle = '#000';
+  for (let r = 0; r < modules; r++) {
+    for (let c = 0; c < modules; c++) {
+      if (qr.isDark(r, c)) ctx.fillRect((c + QUIET) * scale, (r + QUIET) * scale, scale, scale);
+    }
+  }
+  return { version: (modules - 17) / 4, modules, size };
+}
+
+/** 從 canvas 讀回像素並用 jsQR 解碼，回傳解出的字串（失敗回傳 null） */
+function decodeCanvas(canvas) {
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  const r = jsQR(img.data, img.width, img.height, { inversionAttempts: 'dontInvert' });
+  return r ? r.data : null;
+}
+
+/* =====================================================================
+ * 1. 函式庫可用性
+ * ===================================================================== */
+async function testLibraries() {
+  section('1. 函式庫載入與 API 可用性');
+  check('qrcode-generator 已載入', typeof qrcode === 'function');
+  check('jsQR 已載入', typeof jsQR === 'function');
+
+  const c = document.createElement('canvas');
+  const qrInfo = renderQRToCanvas(c, 'HELLO-QR-FOUNTAIN', 'L', 6);
+  check('能畫出 QR 碼', qrInfo.modules > 0, `版本 ${qrInfo.version}，${qrInfo.modules} 模組`);
+  check('畫出來的 QR 能被 jsQR 解回原文', decodeCanvas(c) === 'HELLO-QR-FOUNTAIN');
+}
+
+/* =====================================================================
+ * 2. QR 容量：確認各種區塊大小都塞得進 QR
+ * ===================================================================== */
+async function testCapacity() {
+  section('2. QR 容量（區塊大小 × 糾錯等級）');
+  // 區塊大小的滑桿範圍是 200～1200，兩個端點都要能塞得下
+  for (const blockSize of [200, 600, 1200]) {
+    for (const ecc of ['L', 'M']) {
+      // 封包 = 22 bytes header + payload + 4 bytes CRC，再轉 base64
+      const packetLen = 22 + blockSize + 4;
+      const text = bytesToBase64(makeTestData(packetLen, blockSize));
+      let ok = false, detail = '';
+      try {
+        const c = document.createElement('canvas');
+        const qrInfo = renderQRToCanvas(c, text, ecc, 3);
+        ok = decodeCanvas(c) === text;
+        detail = `${text.length} 字元 → QR 版本 ${qrInfo.version}（${qrInfo.modules} 模組）`;
+      } catch (e) {
+        detail = '超出 QR 最大容量：' + e.message;
+      }
+      check(`區塊 ${blockSize} B ／ 糾錯 ${ecc}`, ok, detail);
+      await yieldToUI();
+    }
+  }
+}
+
+/* =====================================================================
+ * 3. 完整往返：真的畫成 QR、真的掃回來，並丟掉 30% 幀 + 亂序
+ * ===================================================================== */
+async function testRoundTrip() {
+  section('3. 端對端往返（真實 QR 編解碼 + 丟 30% 幀 + 亂序）');
+
+  const fileSize = 20 * 1024;      // 20 KB，讓測試在數秒內跑完
+  const blockSize = 600;
+  const data = makeTestData(fileSize, 20240101);
+  const trueHash = sha256Hex(data);
+
+  // --- 發送端 ---
+  const encoder = new LTEncoder(data, blockSize, { rng: mulberry32(99) });
+  encoder.setMetadata({ name: 'roundtrip.bin', type: 'application/octet-stream', sha256: trueHash });
+
+  const K = encoder.K;
+  const totalFrames = Math.ceil(K * 2.5);
+  const stage = document.getElementById('stageCanvas');
+
+  // 一幀一幀「播放」出來，同時把畫面上的像素掃回字串
+  const scanned = [];
+  let renderFail = 0;
+  for (let i = 0; i < totalFrames; i++) {
+    const pkt = encoder.nextPacket();
+    const text = bytesToBase64(pkt.bytes);
+    renderQRToCanvas(stage, text, 'L', 3);
+    const got = decodeCanvas(stage);
+    if (got === null) renderFail++;
+    else scanned.push(got);
+    if (i % 20 === 0) await yieldToUI();   // 讓畫面有機會更新
+  }
+  check('每一幀畫出來的 QR 都掃得回來', renderFail === 0,
+    `播放 ${totalFrames} 幀，掃失敗 ${renderFail} 幀`);
+
+  // --- 通道：丟掉 30% + 完全打亂順序 ---
+  const rand = mulberry32(555);
+  const survived = scanned.filter(() => rand() >= 0.30);
+  for (let i = survived.length - 1; i > 0; i--) {
+    const j = Math.floor(rand() * (i + 1));
+    [survived[i], survived[j]] = [survived[j], survived[i]];
+  }
+  check('模擬通道：丟 30% 幀並打亂順序', true,
+    `${scanned.length} 幀 → 存活 ${survived.length} 幀（亂序）`);
+
+  // --- 接收端 ---
+  let decoder = null, consumed = 0;
+  for (const text of survived) {
+    consumed++;
+    const pkt = decodePacket(base64ToBytes(text));
+    if (!pkt) continue;
+    if (!decoder) decoder = new LTDecoder(pkt);
+    if (pkt.sessionId !== decoder.sessionId) continue;
+    decoder.addPacket(pkt);
+    if (decoder.isComplete && decoder.metadata) break;
+  }
+
+  check('解碼器完成還原', decoder !== null && decoder.isComplete,
+    decoder ? `解出 ${decoder.solvedCount}/${decoder.K} 塊，用了 ${consumed} 幀` : '沒有收到任何有效幀');
+
+  if (decoder && decoder.isComplete) {
+    const file = decoder.getFile();
+    check('還原長度正確', file.length === fileSize, `${file.length} bytes`);
+    check('內容與原檔逐位元組相同', file.every((v, i) => v === data[i]));
+    check('SHA-256 驗證通過', sha256Hex(file) === trueHash, trueHash.slice(0, 24) + '…');
+    check('metadata 正確送達',
+      decoder.metadata.name === 'roundtrip.bin' && decoder.metadata.sha256 === trueHash);
+    check('解碼開銷在合理範圍', decoder.stats.accepted / decoder.K < 1.6,
+      `吃進 ${decoder.stats.accepted} 個區塊 = ${(decoder.stats.accepted / decoder.K).toFixed(2)}× K`);
+  }
+}
+
+/* =====================================================================
+ * 4. 模擬相機重取樣：QR 被縮放、模糊之後還掃不掃得到
+ * =====================================================================
+ * 真實相機不會像素對像素地拍到螢幕，一定會經過縮放與插值。
+ * 這裡把畫好的 QR 縮小再放大（開啟平滑處理），逼近相機的重取樣效果，
+ * 用來判斷「每個模組至少要佔幾個相機像素」才掃得動。
+ */
+async function testCameraResampling() {
+  section('4. 模擬相機重取樣（每模組像素數 vs 掃描成功率）');
+
+  const blockSize = 600;
+  const text = bytesToBase64(makeTestData(22 + blockSize + 4, 7));
+  const src = document.createElement('canvas');
+  const qrInfo = renderQRToCanvas(src, text, 'L', 8);
+  const cam = document.getElementById('camCanvas');
+
+  /**
+   * 把畫好的 QR 重新取樣成「相機拍到的樣子」。
+   * 單純用 drawImage 縮小其實太乾淨了 —— 真實相機還有鏡頭模糊與感光雜訊，
+   * 而這兩者才是決定掃描門檻的主因，所以一併模擬，量出來的門檻才有參考價值。
+   * @param {number} pxPerModule 每個 QR 模組佔幾個相機像素
+   * @param {number} noise 雜訊振幅（0..255）
+   * @param {number} blurPx 模糊半徑（相機像素）
+   */
+  function simulateCamera(pxPerModule, noise, blurPx) {
+    const camSize = Math.round((qrInfo.modules + 8) * pxPerModule);
+    cam.width = camSize; cam.height = camSize;
+    const ctx = cam.getContext('2d', { willReadFrequently: true });
+
+    ctx.imageSmoothingEnabled = true;        // 縮放插值
+    ctx.imageSmoothingQuality = 'medium';
+    ctx.filter = `blur(${blurPx}px)`;        // 鏡頭／對焦造成的模糊
+    ctx.drawImage(src, 0, 0, camSize, camSize);
+    ctx.filter = 'none';
+
+    if (noise > 0) {
+      // 疊上均勻雜訊，模擬感光元件在室內光線下的顆粒
+      const img = ctx.getImageData(0, 0, camSize, camSize);
+      const rand = mulberry32(0xc0ffee);
+      for (let i = 0; i < img.data.length; i += 4) {
+        const v = Math.max(0, Math.min(255, img.data[i] + (rand() - 0.5) * 2 * noise));
+        img.data[i] = v; img.data[i + 1] = v; img.data[i + 2] = v;
+      }
+      ctx.putImageData(img, 0, 0);
+    }
+    return { camSize, ok: decodeCanvas(cam) === text };
+  }
+
+  // --- (a) 理想條件：只有縮放，沒有模糊與雜訊 ---
+  info('— 理想條件（純縮放，無模糊與雜訊）—');
+  const cleanOk = [];
+  for (const px of [1, 1.5, 2, 3]) {
+    const r = simulateCamera(px, 0, 0);
+    if (r.ok) cleanOk.push(px);
+    info(`每模組 ${px} 像素`, `${r.camSize}×${r.camSize} · ${r.ok ? '掃得到' : '掃不到'}`);
+    await yieldToUI();
+  }
+
+  // --- (b) 貼近真實：加上鏡頭模糊與感光雜訊 ---
+  info('— 貼近真實（鏡頭模糊 0.8px + 雜訊 ±18）—');
+  const realOk = [];
+  for (const px of [1.5, 2, 3, 4, 5]) {
+    const r = simulateCamera(px, 18, 0.8);
+    if (r.ok) realOk.push(px);
+    info(`每模組 ${px} 像素`, `${r.camSize}×${r.camSize} · ${r.ok ? '掃得到' : '掃不到'}`);
+    await yieldToUI();
+  }
+
+  // 這兩項才是真正的斷言
+  const generous = simulateCamera(5, 18, 0.8);
+  check('解析度充足（每模組 5 像素）時，即使有模糊與雜訊也必須掃得到', generous.ok,
+    `${generous.camSize}×${generous.camSize} 像素`);
+  check('理想條件下每模組 2 像素必須掃得到', cleanOk.includes(2));
+
+  const minReal = realOk.length ? Math.min(...realOk) : null;
+  info('→ 實務結論', minReal
+    ? `版本 ${qrInfo.version}（${qrInfo.modules} 模組）在含模糊與雜訊時，每模組需約 ${minReal} 個相機像素，`
+      + `即 QR 要佔到畫面中 ${Math.ceil((qrInfo.modules + 8) * minReal)} 像素見方以上`
+    : '在此模糊／雜訊設定下，所有測試解析度均告失敗');
+}
+
+/* =====================================================================
+ * 5. 抗干擾：壞掉的封包一定要被擋下來
+ * ===================================================================== */
+async function testCorruption() {
+  section('5. 壞封包防護');
+
+  const encoder = new LTEncoder(makeTestData(4096, 3), 600, { rng: mulberry32(1) });
+  const pkt = encoder.nextPacket();
+
+  // 隨機翻掉封包中的位元，確認 CRC32 全部攔得下來
+  const rand = mulberry32(2024);
+  let caught = 0, trials = 300;
+  for (let t = 0; t < trials; t++) {
+    const bad = new Uint8Array(pkt.bytes);
+    const pos = Math.floor(rand() * bad.length);
+    bad[pos] ^= 1 << Math.floor(rand() * 8);
+    if (decodePacket(bad) === null) caught++;
+  }
+  check('隨機單一位元翻轉全部被 CRC32 擋下', caught === trials, `${caught}/${trials}`);
+
+  // 掃到不相干的 QR 碼（例如網址）時不能當成資料
+  check('非本協定的 QR 內容會被忽略',
+    decodePacket(base64ToBytes('aHR0cHM6Ly9leGFtcGxlLmNvbQ==') || new Uint8Array(0)) === null);
+  check('亂碼字串不會讓程式崩潰', (() => {
+    try { decodePacket(base64ToBytes('!!!not-base64!!!') || new Uint8Array(0)); return true; }
+    catch { return false; }
+  })());
+}
+
+/* =====================================================================
+ * 執行
+ * ===================================================================== */
+(async () => {
+  const t0 = performance.now();
+  try {
+    await testLibraries();
+    await testCapacity();
+    await testRoundTrip();
+    await testCameraResampling();
+    await testCorruption();
+  } catch (e) {
+    check('測試執行過程發生未預期的例外', false, e.message);
+    console.error(e);
+  }
+  const elapsed = ((performance.now() - t0) / 1000).toFixed(1);
+  const sum = document.getElementById('summary');
+  sum.className = failed === 0 ? 'ok' : 'bad';
+  sum.textContent = failed === 0
+    ? `✅ 全部 ${passed} 項通過（耗時 ${elapsed} 秒）`
+    : `❌ ${passed} 項通過、${failed} 項失敗（耗時 ${elapsed} 秒）`;
+
+  // 給自動化測試（Playwright）讀取用
+  window.__TEST_RESULT__ = { passed, failed, done: true };
+})();
+</script>
+</body>
+</html>

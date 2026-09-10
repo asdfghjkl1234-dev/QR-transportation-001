@@ -640,14 +640,18 @@ export class LTDecoder {
    *          progressed = 這一包讓多少個來源區塊被解出來
    */
   addPacket(pkt) {
-    // metadata 幀不參與 LT 解碼，只是把檔名／MIME／SHA-256 記下來
+    // metadata 幀不參與 LT 解碼，只是把檔名／MIME／SHA-256 記下來。
+    // 發送端每 20 幀就播一次 metadata，而且相機的取樣率通常高於播放幀率，
+    // 所以同一張 metadata QR 會被掃到很多次 —— 只有第一次算數，其餘視為重複幀。
     if (pkt.isMetadata) {
-      if (!this.metadata) {
-        try {
-          this.metadata = JSON.parse(new TextDecoder().decode(pkt.payload));
-        } catch {
-          return { accepted: false, reason: 'metadata-parse-error', progressed: 0 };
-        }
+      if (this.metadata) {
+        this.stats.duplicate++;
+        return { accepted: false, reason: 'duplicate', progressed: 0 };
+      }
+      try {
+        this.metadata = JSON.parse(new TextDecoder().decode(pkt.payload));
+      } catch {
+        return { accepted: false, reason: 'metadata-parse-error', progressed: 0 };
       }
       return { accepted: true, reason: 'metadata', progressed: 0 };
     }

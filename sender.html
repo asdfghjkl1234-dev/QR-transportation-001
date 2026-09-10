@@ -1,0 +1,586 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>QR 串流傳檔 — 發送端</title>
+
+<!--
+  發送端：把檔案編碼成一連串 QR 碼在螢幕上循環播放。
+  資料流：檔案 → LTEncoder 切塊 → 每幀取一個編碼區塊 → 封包 → base64 → QR → Canvas
+
+  QR 編碼函式庫：qrcode-generator 1.4.4（kazuhikoarase，MIT）
+  以純 <script> 載入時會建立全域變數 `qrcode`；API 為
+  qrcode(typeNumber, ecl) → { addData(str, mode), make(), getModuleCount(), isDark(r, c) }
+  typeNumber 傳 0 代表自動挑選最小可容納的版本。
+  （已確認 1.4.4 版的全域匯出與上述 API 皆可用。）
+-->
+<script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js"></script>
+<script>
+  // CDN 連不上時（沒網路 / 內網 / CDN 被擋）改用 vendor/ 裡的本地備份，
+  // 讓整套系統維持「完全離線」也能運作。
+  // 這裡用 document.write 是刻意的：它在文件解析階段同步插入 <script>，
+  // 能保證備份檔在下面的 module script 執行前就載入完成。
+  if (typeof qrcode === 'undefined') {
+    document.write('<scr' + 'ipt src="vendor/qrcode-generator-1.4.4.js"></scr' + 'ipt>');
+  }
+</script>
+
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #171a21;
+    --border: #262b36;
+    --text: #e6e9ef;
+    --muted: #9aa3b2;
+    --accent: #4f9dff;
+    --warn: #ffb648;
+    --danger: #ff6b6b;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.6 system-ui, -apple-system, "Noto Sans TC", "Microsoft JhengHei", sans-serif;
+    min-height: 100vh;
+  }
+  .wrap { max-width: 1200px; margin: 0 auto; padding: 24px 16px 48px; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 20px; font-size: 13px; }
+  .sub a { color: var(--accent); }
+
+  .layout { display: grid; grid-template-columns: 340px 1fr; gap: 20px; align-items: start; }
+  @media (max-width: 860px) { .layout { grid-template-columns: 1fr; } }
+
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px; }
+  .card + .card { margin-top: 16px; }
+  .card h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em;
+             color: var(--muted); margin: 0 0 12px; font-weight: 600; }
+
+  /* --- 拖放區 --- */
+  #drop {
+    border: 2px dashed var(--border); border-radius: 10px; padding: 28px 16px;
+    text-align: center; cursor: pointer; transition: border-color .15s, background .15s;
+  }
+  #drop:hover, #drop.over { border-color: var(--accent); background: rgba(79,157,255,.07); }
+  #drop .big { font-size: 15px; margin-bottom: 4px; }
+  #drop .small { color: var(--muted); font-size: 12px; }
+  #fileInput { display: none; }
+
+  /* --- 控制項 --- */
+  .ctl { margin-bottom: 16px; }
+  .ctl:last-child { margin-bottom: 0; }
+  .ctl label { display: flex; justify-content: space-between; align-items: baseline;
+               font-size: 13px; margin-bottom: 6px; }
+  .ctl .val { color: var(--accent); font-variant-numeric: tabular-nums; font-weight: 600; }
+  input[type=range] { width: 100%; accent-color: var(--accent); }
+  .hint { color: var(--muted); font-size: 11.5px; margin-top: 4px; }
+
+  .seg { display: flex; gap: 6px; }
+  .seg button {
+    flex: 1; padding: 7px; border-radius: 7px; border: 1px solid var(--border);
+    background: transparent; color: var(--muted); cursor: pointer; font-size: 13px;
+  }
+  .seg button.on { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+
+  .check { display: flex; gap: 8px; align-items: flex-start; font-size: 13px; cursor: pointer; }
+  .check input { margin-top: 4px; accent-color: var(--accent); }
+
+  /* --- 按鈕 --- */
+  .buttons { display: flex; gap: 8px; flex-wrap: wrap; }
+  button.btn {
+    padding: 10px 18px; border-radius: 8px; border: 1px solid var(--border);
+    background: var(--panel); color: var(--text); cursor: pointer; font-size: 14px;
+  }
+  button.btn:hover:not(:disabled) { border-color: var(--accent); }
+  button.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  button.btn:disabled { opacity: .4; cursor: not-allowed; }
+
+  /* --- 資訊列 --- */
+  .kv { display: grid; grid-template-columns: auto 1fr; gap: 4px 14px; font-size: 13px; }
+  .kv dt { color: var(--muted); }
+  .kv dd { margin: 0; font-variant-numeric: tabular-nums; word-break: break-all; }
+
+  .note { border-radius: 8px; padding: 10px 12px; font-size: 12.5px; margin-top: 12px; }
+  .note.warn { background: rgba(255,182,72,.1); border: 1px solid rgba(255,182,72,.35); color: var(--warn); }
+  .note.err  { background: rgba(255,107,107,.1); border: 1px solid rgba(255,107,107,.35); color: var(--danger); }
+  .hidden { display: none !important; }
+
+  /* --- QR 舞台 --- */
+  #stage { background: #fff; border-radius: 10px; padding: 0; display: flex;
+           align-items: center; justify-content: center; min-height: 420px; overflow: hidden; }
+  #qr { display: block; image-rendering: pixelated; }   /* 關閉縮放時的平滑處理，維持銳利邊緣 */
+  #stage.idle { background: var(--panel); border: 1px dashed var(--border); color: var(--muted); }
+
+  /* 全螢幕時：整片白底、QR 置中，四周留白就是 quiet zone */
+  #stage:fullscreen { background: #fff; min-height: 100vh; width: 100vw; padding: 0; }
+
+  .statbar { display: flex; gap: 18px; flex-wrap: wrap; margin-top: 12px;
+             font-size: 12.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .statbar b { color: var(--text); font-weight: 600; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>QR 串流傳檔 — 發送端</h1>
+  <p class="sub">
+    用 LT 噴泉碼把檔案編成無限長的 QR 碼串流。接收端漏幀、亂序、重複掃描都沒關係，
+    收到足夠的區塊就能還原。請在另一台裝置上開啟 <a href="receiver.html">receiver.html</a> 對著螢幕掃描。
+  </p>
+
+  <div class="layout">
+    <!-- ================= 左側控制面板 ================= -->
+    <div>
+      <div class="card">
+        <h2>1. 選擇檔案</h2>
+        <div id="drop">
+          <div class="big">拖放檔案到這裡</div>
+          <div class="small">或點擊選擇（圖片 / 影片 / 任意檔案）</div>
+        </div>
+        <input type="file" id="fileInput">
+
+        <div id="fileInfo" class="hidden" style="margin-top:14px">
+          <dl class="kv">
+            <dt>檔名</dt><dd id="fName">—</dd>
+            <dt>類型</dt><dd id="fType">—</dd>
+            <dt>大小</dt><dd id="fSize">—</dd>
+            <dt>區塊數 K</dt><dd id="fBlocks">—</dd>
+            <dt>預估時間</dt><dd id="fEta">—</dd>
+          </dl>
+        </div>
+
+        <label class="check hidden" id="jpegRow" style="margin-top:14px">
+          <input type="checkbox" id="jpegOpt">
+          <span>
+            傳送前先縮圖壓縮成 JPEG
+            <div class="hint">大幅減少資料量與傳輸時間，代價是畫質下降（僅適用於圖片）</div>
+          </span>
+        </label>
+        <div id="jpegCtls" class="hidden" style="margin-top:10px">
+          <div class="ctl">
+            <label>最長邊上限 <span class="val" id="jpegDimVal">1280 px</span></label>
+            <input type="range" id="jpegDim" min="320" max="2560" step="80" value="1280">
+          </div>
+          <div class="ctl">
+            <label>JPEG 品質 <span class="val" id="jpegQVal">0.75</span></label>
+            <input type="range" id="jpegQ" min="0.3" max="0.95" step="0.05" value="0.75">
+          </div>
+        </div>
+
+        <div id="sizeWarn" class="note warn hidden"></div>
+        <div id="errBox" class="note err hidden"></div>
+      </div>
+
+      <div class="card">
+        <h2>2. 傳輸參數</h2>
+        <div class="ctl">
+          <label>幀率 FPS <span class="val" id="fpsVal">10</span></label>
+          <input type="range" id="fps" min="2" max="30" step="1" value="10">
+          <div class="hint">太高相機會跟不上；一般手機建議 8～12</div>
+        </div>
+        <div class="ctl">
+          <label>區塊大小 <span class="val" id="bsVal">600 bytes</span></label>
+          <input type="range" id="bs" min="200" max="1200" step="50" value="600">
+          <div class="hint">越大吞吐越高，但 QR 越密、越難掃</div>
+        </div>
+        <div class="ctl">
+          <label>QR 糾錯等級</label>
+          <div class="seg" id="eccSeg">
+            <button data-ecc="L" class="on">L（7%，容量大）</button>
+            <button data-ecc="M">M（15%，較耐髒）</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ================= 右側播放區 ================= -->
+    <div>
+      <div class="card">
+        <div class="buttons">
+          <button class="btn primary" id="btnStart" disabled>開始播放</button>
+          <button class="btn" id="btnPause" disabled>暫停</button>
+          <button class="btn" id="btnFull" disabled>全螢幕</button>
+        </div>
+        <div class="statbar">
+          <span>目前幀編號 <b id="sFrame">—</b></span>
+          <span>已送出 <b id="sSent">0</b> 幀</span>
+          <span>實測 FPS <b id="sFps">—</b></span>
+          <span>QR 版本 <b id="sVer">—</b></span>
+          <span>吞吐 <b id="sRate">—</b></span>
+        </div>
+      </div>
+
+      <div class="card" style="padding:12px">
+        <div id="stage" class="idle">
+          <span id="stageHint">選好檔案後按「開始播放」</span>
+          <canvas id="qr" class="hidden"></canvas>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script type="module">
+import { LTEncoder, bytesToBase64, sha256Hex, METADATA_INTERVAL } from './fountain.js';
+
+/* =====================================================================
+ * 狀態（全部放在記憶體，不使用 localStorage）
+ * ===================================================================== */
+const state = {
+  file: null,          // 使用者選的原始 File
+  payloadBytes: null,  // 實際要傳的位元組（可能是壓縮後的 JPEG）
+  payloadName: '',
+  payloadType: '',
+  sha: '',
+  encoder: null,
+  ecc: 'L',
+  playing: false,
+  rafId: 0,
+  nextFrameAt: 0,      // 下一幀應該在什麼時候畫（毫秒，performance.now 時基）
+  sentFrames: 0,
+  fpsWindow: [],       // 最近的實際繪製時間點，用來算實測 FPS
+};
+
+const $ = (id) => document.getElementById(id);
+
+/* =====================================================================
+ * 小工具
+ * ===================================================================== */
+function fmtBytes(n) {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / 1024 / 1024).toFixed(2)} MB`;
+}
+
+function fmtDuration(sec) {
+  if (!isFinite(sec)) return '—';
+  if (sec < 60) return `${Math.ceil(sec)} 秒`;
+  const m = Math.floor(sec / 60);
+  const s = Math.round(sec % 60);
+  return `${m} 分 ${s} 秒`;
+}
+
+function showError(msg) {
+  const box = $('errBox');
+  if (!msg) { box.classList.add('hidden'); return; }
+  box.textContent = msg;
+  box.classList.remove('hidden');
+}
+
+/* =====================================================================
+ * 檔案處理
+ * ===================================================================== */
+async function handleFile(file) {
+  showError('');
+  state.file = file;
+  $('fileInfo').classList.remove('hidden');
+  $('fName').textContent = file.name;
+  $('fType').textContent = file.type || '（未知）';
+
+  // 只有圖片才顯示「壓縮成 JPEG」選項
+  const isImage = file.type.startsWith('image/');
+  $('jpegRow').classList.toggle('hidden', !isImage);
+  if (!isImage) $('jpegOpt').checked = false;
+  $('jpegCtls').classList.toggle('hidden', !(isImage && $('jpegOpt').checked));
+
+  await preparePayload();
+}
+
+/**
+ * 準備真正要傳輸的位元組：
+ * 若使用者勾選了 JPEG 壓縮就先縮圖，否則直接讀原檔。
+ * 同時算好 SHA-256（接收端會用它驗證還原結果）。
+ */
+async function preparePayload() {
+  if (!state.file) return;
+  const useJpeg = $('jpegOpt').checked && state.file.type.startsWith('image/');
+
+  $('fSize').textContent = '處理中…';
+  $('btnStart').disabled = true;
+
+  try {
+    if (useJpeg) {
+      const { bytes, name } = await compressImage(
+        state.file, Number($('jpegDim').value), Number($('jpegQ').value));
+      state.payloadBytes = bytes;
+      state.payloadName = name;
+      state.payloadType = 'image/jpeg';
+    } else {
+      state.payloadBytes = new Uint8Array(await state.file.arrayBuffer());
+      state.payloadName = state.file.name;
+      // 有些檔案 type 是空字串，補一個泛用值免得接收端不知道怎麼處理
+      state.payloadType = state.file.type || 'application/octet-stream';
+    }
+    // SHA-256 用純 JS 算，因此在純 http 的區網位址也能運作
+    state.sha = sha256Hex(state.payloadBytes);
+  } catch (e) {
+    showError('讀取或壓縮檔案失敗：' + e.message);
+    return;
+  }
+
+  const n = state.payloadBytes.length;
+  const original = state.file.size;
+  $('fSize').textContent = useJpeg
+    ? `${fmtBytes(n)}（原檔 ${fmtBytes(original)}，壓縮到 ${(n / original * 100).toFixed(0)}%）`
+    : fmtBytes(n);
+
+  // 超過 5 MB 就警告：QR 的頻寬實在有限
+  const warn = $('sizeWarn');
+  if (n > 5 * 1024 * 1024) {
+    warn.classList.remove('hidden');
+    warn.innerHTML = `⚠️ 檔案 ${fmtBytes(n)} 超過 5 MB，用 QR 碼傳會非常久（見下方預估時間）。`
+      + `建議先壓縮：圖片可勾選上方的 JPEG 壓縮，影片請先用其他工具轉成更低位元率再傳。`;
+  } else {
+    warn.classList.add('hidden');
+  }
+
+  updateEstimate();
+  $('btnStart').disabled = false;
+  $('btnFull').disabled = false;
+}
+
+/**
+ * 把圖片縮到指定的最長邊並重新編碼成 JPEG。
+ * @param {File} file
+ * @param {number} maxDim 最長邊的像素上限
+ * @param {number} quality 0..1
+ */
+async function compressImage(file, maxDim, quality) {
+  const bitmap = await createImageBitmap(file);
+  // 只縮小不放大：原圖比上限小就維持原尺寸
+  const scale = Math.min(1, maxDim / Math.max(bitmap.width, bitmap.height));
+  const w = Math.max(1, Math.round(bitmap.width * scale));
+  const h = Math.max(1, Math.round(bitmap.height * scale));
+
+  const canvas = document.createElement('canvas');
+  canvas.width = w; canvas.height = h;
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(bitmap, 0, 0, w, h);
+  bitmap.close();
+
+  const blob = await new Promise((res) => canvas.toBlob(res, 'image/jpeg', quality));
+  if (!blob) throw new Error('瀏覽器無法輸出 JPEG');
+
+  // 換掉副檔名，讓接收端下載時拿到合理的檔名
+  const name = file.name.replace(/\.[^.]+$/, '') + '.jpg';
+  return { bytes: new Uint8Array(await blob.arrayBuffer()), name };
+}
+
+/**
+ * 更新「區塊數 K」與「預估傳輸時間」。
+ * 預估時間 = K × 解碼開銷 × metadata 幀開銷 ÷ FPS。
+ * 開銷取 1.15（實測 K 上千時約 1.1～1.2×），metadata 幀每 20 幀一個所以再乘 21/20。
+ */
+function updateEstimate() {
+  if (!state.payloadBytes) return;
+  const blockSize = Number($('bs').value);
+  const fps = Number($('fps').value);
+  const K = Math.max(1, Math.ceil(state.payloadBytes.length / blockSize));
+  const frames = K * 1.15 * (METADATA_INTERVAL + 1) / METADATA_INTERVAL;
+
+  $('fBlocks').textContent = `${K} 塊 × ${blockSize} B`;
+  $('fEta').textContent = `約 ${fmtDuration(frames / fps)}（訊號良好時約 ${fmtDuration(K / fps)}）`;
+  $('sRate').textContent = `${(blockSize * fps / 1024).toFixed(1)} KB/s（理論上限）`;
+}
+
+/* =====================================================================
+ * QR 繪製
+ * ===================================================================== */
+const canvas = $('qr');
+const ctx = canvas.getContext('2d', { alpha: false });
+
+/**
+ * 把一段字串畫成 QR 碼，盡量填滿舞台並保留 quiet zone。
+ * @param {string} text 要編碼的內容（我們的封包 base64）
+ * @returns {number} 這次使用的 QR 版本編號
+ */
+function drawQR(text) {
+  // typeNumber = 0：讓函式庫自動挑選最小可容納的版本
+  const qr = qrcode(0, state.ecc);
+  qr.addData(text, 'Byte');
+  qr.make();
+
+  const modules = qr.getModuleCount();
+  // QR 規格要求四周至少留 4 個模組寬的空白（quiet zone），這裡留 4 個
+  const QUIET = 4;
+  const totalModules = modules + QUIET * 2;
+
+  // 依舞台可用空間算出每個模組要幾個「實體像素」——必須是整數，
+  // 否則模組邊界會落在半個像素上，相機拍起來就會糊掉
+  const stage = $('stage');
+  const rect = stage.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  const availCss = Math.max(120, Math.min(rect.width, rect.height) - 8);
+  const scale = Math.max(1, Math.floor((availCss * dpr) / totalModules));
+
+  const sizePx = totalModules * scale;
+  if (canvas.width !== sizePx) { canvas.width = sizePx; canvas.height = sizePx; }
+  // CSS 尺寸換算回邏輯像素，讓 1 個模組剛好對應整數個實體像素
+  canvas.style.width = `${sizePx / dpr}px`;
+  canvas.style.height = `${sizePx / dpr}px`;
+
+  // 關閉任何平滑／抗鋸齒，確保黑白邊界是硬邊
+  ctx.imageSmoothingEnabled = false;
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, sizePx, sizePx);   // 白底本身就構成 quiet zone
+  ctx.fillStyle = '#000000';
+  for (let r = 0; r < modules; r++) {
+    for (let c = 0; c < modules; c++) {
+      if (qr.isDark(r, c)) {
+        ctx.fillRect((c + QUIET) * scale, (r + QUIET) * scale, scale, scale);
+      }
+    }
+  }
+  // QR 版本 = (模組數 - 17) / 4
+  return (modules - 17) / 4;
+}
+
+/* =====================================================================
+ * 播放迴圈
+ * ===================================================================== */
+
+/** 畫下一幀：從 encoder 取一個封包 → base64 → QR */
+function renderNextFrame() {
+  const pkt = state.encoder.nextPacket();
+  const text = bytesToBase64(pkt.bytes);
+
+  let version;
+  try {
+    version = drawQR(text);
+  } catch (e) {
+    // 資料量超過 QR 最大容量（版本 40）時 qrcode-generator 會丟例外
+    pause();
+    showError(`QR 容量不足（${text.length} 字元）：請把區塊大小調小，或改用糾錯等級 L。原始錯誤：${e.message}`);
+    return;
+  }
+
+  state.sentFrames++;
+  $('sFrame').textContent = pkt.isMetadata ? `${pkt.frameIndex}（metadata）` : `${pkt.frameIndex}`;
+  $('sSent').textContent = state.sentFrames;
+  $('sVer').textContent = `${version}（${state.ecc}）`;
+
+  // 用最近 1 秒內的繪製次數估算實測 FPS
+  const now = performance.now();
+  state.fpsWindow.push(now);
+  while (state.fpsWindow.length && now - state.fpsWindow[0] > 1000) state.fpsWindow.shift();
+  $('sFps').textContent = state.fpsWindow.length.toFixed(0);
+}
+
+/**
+ * requestAnimationFrame 迴圈。
+ * 不直接用 setInterval 是因為它和螢幕更新不同步，會造成幀被吃掉或畫面撕裂；
+ * rAF 保證每次繪製都對齊一次螢幕更新，節奏穩定得多。
+ */
+function loop(now) {
+  if (!state.playing) return;
+  state.rafId = requestAnimationFrame(loop);
+
+  const interval = 1000 / Number($('fps').value);
+  if (now < state.nextFrameAt) return;
+
+  // 以「累加」而不是「now + interval」推進，長期下來平均幀率才會準
+  state.nextFrameAt += interval;
+  // 若因為分頁被切到背景等原因落後太多，直接重新對齊，避免醒來後暴衝補幀
+  if (now - state.nextFrameAt > interval * 3) state.nextFrameAt = now + interval;
+
+  renderNextFrame();
+}
+
+function start() {
+  if (!state.payloadBytes) return;
+  showError('');
+
+  // 每次按「開始」都建立新的 encoder，等於開啟一次新的傳輸階段（新的 sessionId）
+  const blockSize = Number($('bs').value);
+  state.encoder = new LTEncoder(state.payloadBytes, blockSize);
+  state.encoder.setMetadata({
+    name: state.payloadName,
+    type: state.payloadType,
+    sha256: state.sha,
+  });
+  state.sentFrames = 0;
+  state.fpsWindow = [];
+
+  $('stage').classList.remove('idle');
+  $('stageHint').classList.add('hidden');
+  canvas.classList.remove('hidden');
+
+  state.playing = true;
+  state.nextFrameAt = performance.now();
+  $('btnStart').textContent = '重新開始';
+  $('btnPause').disabled = false;
+  $('btnPause').textContent = '暫停';
+  state.rafId = requestAnimationFrame(loop);
+}
+
+function pause() {
+  state.playing = false;
+  cancelAnimationFrame(state.rafId);
+  $('btnPause').textContent = '繼續';
+}
+
+function resume() {
+  if (!state.encoder) return;
+  state.playing = true;
+  state.nextFrameAt = performance.now();
+  $('btnPause').textContent = '暫停';
+  state.rafId = requestAnimationFrame(loop);
+}
+
+/* =====================================================================
+ * 事件綁定
+ * ===================================================================== */
+$('drop').addEventListener('click', () => $('fileInput').click());
+$('fileInput').addEventListener('change', (e) => {
+  if (e.target.files[0]) handleFile(e.target.files[0]);
+});
+
+// 拖放：必須攔截 dragover 的預設行為，否則瀏覽器會直接開啟檔案
+for (const type of ['dragenter', 'dragover']) {
+  $('drop').addEventListener(type, (e) => { e.preventDefault(); $('drop').classList.add('over'); });
+}
+for (const type of ['dragleave', 'drop']) {
+  $('drop').addEventListener(type, (e) => { e.preventDefault(); $('drop').classList.remove('over'); });
+}
+$('drop').addEventListener('drop', (e) => {
+  const f = e.dataTransfer.files[0];
+  if (f) handleFile(f);
+});
+
+$('fps').addEventListener('input', (e) => {
+  $('fpsVal').textContent = e.target.value;
+  updateEstimate();
+});
+$('bs').addEventListener('input', (e) => {
+  $('bsVal').textContent = `${e.target.value} bytes`;
+  updateEstimate();
+});
+$('eccSeg').addEventListener('click', (e) => {
+  const btn = e.target.closest('button');
+  if (!btn) return;
+  state.ecc = btn.dataset.ecc;
+  [...$('eccSeg').children].forEach((b) => b.classList.toggle('on', b === btn));
+});
+
+$('jpegOpt').addEventListener('change', () => {
+  $('jpegCtls').classList.toggle('hidden', !$('jpegOpt').checked);
+  preparePayload();
+});
+$('jpegDim').addEventListener('input', (e) => { $('jpegDimVal').textContent = `${e.target.value} px`; });
+$('jpegQ').addEventListener('input', (e) => { $('jpegQVal').textContent = e.target.value; });
+// 滑桿放開才重新壓縮，免得拖動過程一直重算
+$('jpegDim').addEventListener('change', preparePayload);
+$('jpegQ').addEventListener('change', preparePayload);
+
+$('btnStart').addEventListener('click', start);
+$('btnPause').addEventListener('click', () => (state.playing ? pause() : resume()));
+$('btnFull').addEventListener('click', () => {
+  const stage = $('stage');
+  if (document.fullscreenElement) document.exitFullscreen();
+  else stage.requestFullscreen?.().catch(() => showError('這個瀏覽器拒絕進入全螢幕'));
+});
+
+// 進出全螢幕、視窗大小改變時，QR 的像素尺寸要跟著重算 —— 下一幀自然會生效
+window.addEventListener('resize', () => { if (!state.playing && state.encoder) renderNextFrame(); });
+</script>
+</body>
+</html>
