@@ -1,0 +1,89 @@
+<!doctype html><html><head><meta charset="utf-8"><title>derisk</title></head><body>
+<canvas id="c"></canvas>
+<script type="module">
+import qrcode from '/v2/vendor/qrcode-generator-1.4.4.mjs';
+import { readBarcodes, prepareZXingModule } from '/v2/vendor/zxing-wasm-3.1.3/reader/index.js';
+
+// --- Base45（RFC 9285）最小實作，用來驗證可行性 ---
+const B45 = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ $%*+-./:';
+function b45encode(bytes){
+  let out='';
+  for(let i=0;i<bytes.length-1;i+=2){
+    const n=bytes[i]*256+bytes[i+1];
+    out+=B45[n%45]+B45[Math.floor(n/45)%45]+B45[Math.floor(n/2025)];
+  }
+  if(bytes.length%2){const n=bytes[bytes.length-1];out+=B45[n%45]+B45[Math.floor(n/45)];}
+  return out;
+}
+function b45decode(str){
+  const v=[...str].map(ch=>B45.indexOf(ch));
+  if(v.some(x=>x<0))return null;
+  const out=[];
+  let i=0;
+  for(;i+2<v.length;i+=3){const n=v[i]+v[i+1]*45+v[i+2]*2025;if(n>65535)return null;out.push(n>>8,n&255);}
+  if(v.length-i===2){const n=v[i]+v[i+1]*45;if(n>255)return null;out.push(n);}
+  else if(v.length-i!==0)return null;
+  return new Uint8Array(out);
+}
+
+window.run = async () => {
+  const log=[];
+  // 1) Base45 往返
+  const rnd=new Uint8Array(1000); for(let i=0;i<1000;i++)rnd[i]=(i*37+((i*i)>>3))&255;
+  const enc=b45encode(rnd), dec=b45decode(enc);
+  log.push(`Base45 往返：${dec && dec.length===1000 && dec.every((v,i)=>v===rnd[i]) ? '✓' : '✗'}  (1000 bytes → ${enc.length} 字元，比率 ${(enc.length/1000).toFixed(3)})`);
+  log.push(`Base45 字元是否全在 QR 英數集內：${[...new Set(enc)].every(ch=>B45.includes(ch))?'✓':'✗'}`);
+
+  // 2) 用 Alphanumeric 模式產生 QR（指定版本 15）
+  const VERSION=15, ECC='L';
+  // 二分搜尋這個版本 + 英數模式的容量
+  function fits(n){ try{const q=qrcode(VERSION,ECC);q.addData('A'.repeat(n),'Alphanumeric');q.make();return true;}catch(e){return false;} }
+  let lo=1,hi=3000; while(lo<hi){const m=(lo+hi+1)>>1; if(fits(m))lo=m;else hi=m-1;}
+  log.push(`QR 版本 ${VERSION} / ECC ${ECC} 英數容量：${lo} 字元 → 可裝 ${Math.floor(lo/3)*2} bytes`);
+  // 對照：位元組模式容量
+  function fitsByte(n){ try{const q=qrcode(VERSION,ECC);q.addData('A'.repeat(n),'Byte');q.make();return true;}catch(e){return false;} }
+  let lo2=1,hi2=3000; while(lo2<hi2){const m=(lo2+hi2+1)>>1; if(fitsByte(m))lo2=m;else hi2=m-1;}
+  log.push(`  對照 Byte 模式：${lo2} 字元 → base64 後可裝 ${Math.floor(lo2/4)*3} bytes（英數模式多 ${((Math.floor(lo/3)*2)/(Math.floor(lo2/4)*3)*100-100).toFixed(0)}%）`);
+
+  // 3) 組出 2×2 網格，每格一個獨立 QR
+  const payloads=[0,1,2,3].map(i=>{
+    const bytes=new Uint8Array(Math.floor(lo/3)*2);
+    for(let j=0;j<bytes.length;j++)bytes[j]=(j*7+i*101)&255;
+    return {bytes, text:b45encode(bytes)};
+  });
+  const qrs=payloads.map(p=>{const q=qrcode(VERSION,ECC);q.addData(p.text,'Alphanumeric');q.make();return q;});
+  const M=qrs[0].getModuleCount(), Q=4, cell=M+Q*2, GRID=2;
+  const c=document.getElementById('c'); const S=4;   // 每模組 4 像素
+  c.width=cell*GRID*S; c.height=cell*GRID*S;
+  const ctx=c.getContext('2d',{alpha:false,willReadFrequently:true});
+  ctx.imageSmoothingEnabled=false;
+  ctx.fillStyle='#fff'; ctx.fillRect(0,0,c.width,c.height);
+  ctx.fillStyle='#000';
+  qrs.forEach((q,idx)=>{
+    const gx=(idx%GRID)*cell, gy=Math.floor(idx/GRID)*cell;
+    for(let r=0;r<M;r++)for(let col=0;col<M;col++)
+      if(q.isDark(r,col)) ctx.fillRect((gx+Q+col)*S,(gy+Q+r)*S,S,S);
+  });
+  log.push(`合成畫面：${GRID}×${GRID} 網格，每格 QR v${VERSION}（${M} 模組），畫布 ${c.width}×${c.height}`);
+
+  // 4) zxing 一次解出全部 4 個
+  prepareZXingModule({ overrides: { locateFile: (p,pre)=> p.endsWith('.wasm') ? '/v2/vendor/zxing-wasm-3.1.3/reader/zxing_reader.wasm' : pre+p } });
+  const img=ctx.getImageData(0,0,c.width,c.height);
+  const t0=performance.now();
+  const results=await readBarcodes(img,{formats:['QRCode'],maxNumberOfSymbols:GRID*GRID,tryHarder:false});
+  const ms=performance.now()-t0;
+  log.push(`zxing 解出 ${results.length} / ${GRID*GRID} 個碼（${ms.toFixed(0)} ms）`);
+
+  const texts=new Set(results.map(r=>r.text));
+  const allOk=payloads.every(p=>texts.has(p.text));
+  log.push(`四個 payload 都正確解出：${allOk?'✓':'✗'}`);
+  if(results[0]) log.push(`  位置資訊：topLeft=(${results[0].position.topLeft.x},${results[0].position.topLeft.y}) 可用來畫框 ✓`);
+  // 5) 解出來的字串再經 Base45 還原，逐位元組比對
+  let roundOk=true;
+  for(const r of results){ const back=b45decode(r.text); const match=payloads.find(p=>p.text===r.text);
+    if(!back||!match||back.length!==match.bytes.length||!back.every((v,i)=>v===match.bytes[i])) roundOk=false; }
+  log.push(`QR→Base45→原始位元組 完全一致：${roundOk?'✓':'✗'}`);
+  return log.join('\n');
+};
+window.__READY__=true;
+</script></body></html>
