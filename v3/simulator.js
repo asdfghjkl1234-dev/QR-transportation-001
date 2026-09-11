@@ -117,16 +117,79 @@ export function distort(src, opts, mixWith = null, mixRatio = 0) {
   const inv = matInv(fwd) || [1, 0, 0, 0, 1, 0, 0, 0, 1];
 
   const halfW = W / 2, halfH = H / 2;
-  // 原圖在輸出畫面中的縮放：留白之後原圖只佔中間那塊
-  const scale = 1 / (1 + margin * 2);
-
   const sw = src.width, sh = src.height, sd = src.data;
+
+  // 幾何一律在「等向正規化座標」裡計算：兩軸都除以同一個 norm。
+  //
+  // 一開始是 x 除以半寬、y 除以半高（各軸分開正規化），那等於把桶狀畸變
+  // 做成了橢圓形的 —— 但真實鏡頭的徑向畸變是以光軸為中心、各方向等量的圓形。
+  // 兩者在接近正方形的畫面上差異不大，一到 16:9 就明顯偏掉，
+  // 而接收端擬合的又是（正確的）等向模型，於是模型對不上，
+  // 幾何殘差始終壓不下來，格子錯誤率卡在 20% 以上。
+  const norm = Math.max(halfW, halfH);
+  const snorm = Math.max(sw / 2, sh / 2);
+
+  // 原圖要縮到多小才能在旋轉、透視、桶狀畸變之後完整入鏡？
+  //
+  // 一開始只留固定比例的白邊，小畫面沒事，畫面一大一寬就出問題：
+  // 旋轉 8° 加上傾斜與畸變之後左上角會被推出畫面外，被裁掉的定位標記
+  // 當然偵測不到，症狀是「四個標記只找到三個」，而且只在大尺寸才出現。
+  // 正確做法是把四個角實際做一次正向變換，量出它們撐到多遠再決定縮放 ——
+  // 模擬器要模擬的是「使用者有把碼對進取景框」，不是「碼被切掉一角」。
+  //
+  // 但「正向變換」本身就依賴縮放（透視除法與桶狀畸變都不是線性的，
+  // 半徑變一半，桶狀畸變的效果會變成四分之一），所以這是個隱式方程式：
+  // 縮放要用撐幅算，撐幅又要先知道縮放。第一版直接拿「未縮放的角」去量，
+  // 等於在最大的半徑上估畸變，量出來的撐幅嚴重高估，結果整張圖被縮得太小
+  // —— 8px 的格子在輸出裡只剩 6px，定位與取樣的精度全部跟著掉。
+  // 這裡改成不動點迭代：撐幅算出來偏大就把縮放調小，反之調大，
+  // 幾輪就收斂到「角落剛好落在留白邊界上」。
+  const kBarrel = o.barrel || 0;
+
+  // 原圖四個角在等向座標下的位置（尚未縮放）
+  const srcCorners = [
+    [-(sw / 2) / snorm, -(sh / 2) / snorm], [(sw / 2) / snorm, -(sh / 2) / snorm],
+    [-(sw / 2) / snorm, (sh / 2) / snorm], [(sw / 2) / snorm, (sh / 2) / snorm],
+  ];
+
+  /**
+   * 給定縮放，量出四個角最遠撐到半畫面的幾倍（1.0 代表剛好貼齊邊緣）。
+   */
+  const extentOf = (s) => {
+    let extent = 0;
+    for (const [u0, v0] of srcCorners) {
+      const ux = u0 * s, uy = v0 * s;
+      const w = fwd[6] * ux + fwd[7] * uy + fwd[8];
+      const px0 = (fwd[0] * ux + fwd[1] * uy + fwd[2]) / w;
+      const py0 = (fwd[3] * ux + fwd[4] * uy + fwd[5]) / w;
+      // 正向桶狀畸變：每個畫素的反向映射是 q → q/(1+k·|q|²)，
+      // 所以正向要解 q/(1+k·|q|²) = p。用不動點迭代解，比一階近似準得多。
+      let qx = px0, qy = py0;
+      for (let i = 0; i < 6; i++) {
+        const f = 1 + kBarrel * (qx * qx + qy * qy);
+        qx = px0 * f; qy = py0 * f;
+      }
+      extent = Math.max(extent, Math.abs(qx) * norm / halfW, Math.abs(qy) * norm / halfH);
+    }
+    return extent;
+  };
+
+  // 目標：角落剛好落在「留白後」的可用範圍上
+  const target = 1 / (1 + margin * 2);
+  let scale = target;
+  for (let i = 0; i < 30; i++) {
+    const e = extentOf(scale);
+    if (e < 1e-9) break;
+    const next = scale * (target / e);
+    if (Math.abs(next - scale) < 1e-9) { scale = next; break; }
+    scale = next;
+  }
 
   /** 雙線性取樣 */
   const sample = (img, x, y, dst) => {
     const d = img.data, w = img.width, h = img.height;
     if (x < 0 || y < 0 || x > w - 1 || y > h - 1) {
-      // 畫面外當成中灰的背景（桌面/牆壁）
+      // 畫面外當成中灰的背景（桌面／牆壁）
       dst[0] = 110; dst[1] = 110; dst[2] = 110;
       return;
     }
@@ -145,16 +208,15 @@ export function distort(src, opts, mixWith = null, mixRatio = 0) {
   const px = [0, 0, 0];
   for (let y = 0; y < H; y++) {
     for (let x = 0; x < W; x++) {
-      // 正規化到 [-1,1]
-      let nx = (x - halfW) / halfW;
-      let ny = (y - halfH) / halfH;
+      // 等向正規化（兩軸除以同一個 norm，讓徑向畸變是圓形而不是橢圓）
+      let nx = (x - halfW) / norm;
+      let ny = (y - halfH) / norm;
 
       // --- 反向桶狀畸變 ---
-      // 正向是 r' = r(1 + k·r²)，這裡要反過來。用一次牛頓迭代逼近就夠準了。
-      const k = o.barrel || 0;
-      if (k !== 0) {
+      // 正向是 r' = r(1 + k·r²)，這裡取一階反解
+      if (kBarrel !== 0) {
         const r2 = nx * nx + ny * ny;
-        const f = 1 + k * r2;
+        const f = 1 + kBarrel * r2;
         nx /= f; ny /= f;
       }
 
@@ -164,8 +226,8 @@ export function distort(src, opts, mixWith = null, mixRatio = 0) {
       const uy = (inv[3] * nx + inv[4] * ny + inv[5]) / w2;
 
       // 換回原圖像素座標
-      const sx = (ux / scale + 1) / 2 * sw;
-      const sy = (uy / scale + 1) / 2 * sh;
+      const sx = (ux / scale) * snorm + sw / 2;
+      const sy = (uy / scale) * snorm + sh / 2;
 
       // --- 撕裂：上半取另一幀 ---
       const useMix = mixWith && (y / H) < mixRatio;

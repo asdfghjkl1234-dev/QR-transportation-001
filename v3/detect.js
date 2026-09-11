@@ -44,6 +44,60 @@ export function toGray(img) {
 }
 
 /* =========================================================================
+ * 1b. 自適應二值化
+ * =========================================================================
+ * 定位標記是靠「黑白跑道長度的比例」找出來的，所以「哪裡算黑、哪裡算白」
+ * 這個判斷必須夠準。
+ *
+ * 一開始用全域平均當門檻，在大畫面上整個失準：
+ * C4 的調色盤是 黑(0)／白(255)／洋紅(105)／綠(150)，全域平均會落在 155 附近，
+ * 於是連「綠」都被判成黑；再加上由上到下的亮度漸層與局部反光，
+ * 同一個門檻在畫面不同位置代表的意義完全不同。
+ * 症狀很隱晦：小畫面正常，一放大到 1920×1080 的實際尺寸，
+ * 四個定位標記就只找得到三個。
+ *
+ * 改用 Bradley 局部平均法：每個像素只跟自己周圍一塊的平均值比較，
+ * 亮度漸層、反光、調色盤造成的整體偏移全部自動吸收。
+ * 用積分圖計算，每個像素的區域平均都是 O(1)。
+ */
+
+/**
+ * @param {Uint8ClampedArray} gray
+ * @param {number} W
+ * @param {number} H
+ * @param {number} [win] 取樣視窗邊長，預設約畫面寬的 1/12
+ * @param {number} [bias=0.90] 門檻 = 區域平均 × bias
+ * @returns {Uint8Array} 1 = 暗，0 = 亮
+ */
+export function adaptiveBinarize(gray, W, H, win, bias = 0.90) {
+  const window = win || Math.max(16, Math.round(W / 12));
+  const integral = new Float64Array((W + 1) * (H + 1));
+  for (let y = 0; y < H; y++) {
+    let rowSum = 0;
+    for (let x = 0; x < W; x++) {
+      rowSum += gray[y * W + x];
+      integral[(y + 1) * (W + 1) + (x + 1)] = integral[y * (W + 1) + (x + 1)] + rowSum;
+    }
+  }
+
+  const out = new Uint8Array(W * H);
+  const r = window >> 1;
+  for (let y = 0; y < H; y++) {
+    const y0 = Math.max(0, y - r), y1 = Math.min(H - 1, y + r);
+    for (let x = 0; x < W; x++) {
+      const x0 = Math.max(0, x - r), x1 = Math.min(W - 1, x + r);
+      const area = (y1 - y0 + 1) * (x1 - x0 + 1);
+      const sum = integral[(y1 + 1) * (W + 1) + (x1 + 1)]
+                - integral[y0 * (W + 1) + (x1 + 1)]
+                - integral[(y1 + 1) * (W + 1) + x0]
+                + integral[y0 * (W + 1) + x0];
+      out[y * W + x] = gray[y * W + x] * area < sum * bias ? 1 : 0;
+    }
+  }
+  return out;
+}
+
+/* =========================================================================
  * 2. 定位標記偵測
  * =========================================================================
  * 我們的定位標記沿著中心線的黑白跑道長度比例是 1:1:3:1:1
@@ -78,15 +132,15 @@ function checkRatio(runs) {
  * @param {number} threshold 黑白分界
  * @returns {{center:number, size:number}[]}
  */
-function scanLine(get, len, threshold) {
+function scanLine(get, len) {
   if (len < 7) return [];
 
-  // 先拆成黑白交替的跑道
+  // 先拆成黑白交替的跑道（get 直接回傳 1=暗 / 0=亮）
   const runs = [];
-  let dark = get(0) < threshold;
+  let dark = get(0) === 1;
   let start = 0;
   for (let i = 1; i < len; i++) {
-    const d = get(i) < threshold;
+    const d = get(i) === 1;
     if (d !== dark) {
       runs.push({ dark, start, len: i - start });
       dark = d; start = i;
@@ -114,23 +168,19 @@ function scanLine(get, len, threshold) {
  * @returns {{x:number, y:number, size:number}[]}
  */
 export function findFinders(gray, W, H) {
-  // 用全域平均當門檻。畫面裡黑白各佔一半左右，平均值是不錯的分界；
-  // 局部光照不均由後面的「每格相對於色票條」來處理，這裡只要找得到標記就好。
-  let sum = 0;
-  for (let i = 0; i < gray.length; i++) sum += gray[i];
-  const threshold = sum / gray.length;
+  const bin = adaptiveBinarize(gray, W, H);
 
   const candidates = [];
-  // 水平掃描（隔行掃以節省時間，標記至少 7 個格子高，不會漏掉）
-  const step = Math.max(1, Math.floor(H / 400));
+  // 隔列掃描以節省時間；間距要隨畫面大小調整，太稀疏會錯過標記
+  const step = Math.max(1, Math.floor(H / 500));
   for (let y = 0; y < H; y += step) {
     const row = y * W;
-    for (const c of scanLine((i) => gray[row + i], W, threshold)) {
-      // 垂直方向驗證
+    for (const c of scanLine((i) => bin[row + i], W)) {
+      // 垂直方向驗證：同一個位置在垂直掃描上也要看到 1:1:3:1:1
       const cx = Math.round(c.center);
       if (cx < 0 || cx >= W) continue;
-      const vsCenters = scanLine((i) => gray[i * W + cx], H, threshold);
-      const match = vsCenters.find((v) => Math.abs(v.center - y) < c.size * 2.5);
+      const vsCenters = scanLine((i) => bin[i * W + cx], H);
+      const match = vsCenters.find((v) => Math.abs(v.center - y) < c.size * 3);
       if (!match) continue;
       candidates.push({ x: c.center, y: match.center, size: (c.size + match.size) / 2 });
     }
@@ -167,7 +217,23 @@ export function findFinders(gray, W, H) {
  */
 export function pickCorners(clusters) {
   if (clusters.length < 4) return null;
-  const pool = clusters.slice(0, 40);   // 只在命中次數較高的候選裡挑
+
+  // 先濾掉「格子大小」明顯不合群的候選。
+  //
+  // 這一步是必要的：畫面一大，資料區裡湊巧形成 1:1:3:1:1 的位置就變多，
+  // 其中偶爾會出現極小的假標記（實測 150×90 的畫面出現一個 size=1.4 的候選，
+  // 真正的標記都在 6～7 之間）。假標記如果剛好落在 (x+y) 的極值上，
+  // 就會被當成右下角取走，四點單應性整個歪掉 —— 症狀是幾何殘差從 0.5px
+  // 跳到 3.9px，而且只在大畫面才出現，小畫面剛好沒有這種假標記。
+  //
+  // 同一張圖裡所有標記的格子大小應該相近（桶狀畸變頂多差個兩三成），
+  // 所以用中位數當基準，保留 0.5～2 倍的候選，寬鬆但足以踢掉離譜的。
+  const sizes = clusters.map((c) => c.size).sort((a, b) => a - b);
+  const medSize = sizes[sizes.length >> 1];
+  const consistent = clusters.filter((c) => c.size >= medSize * 0.5 && c.size <= medSize * 2);
+  const source = consistent.length >= 4 ? consistent : clusters;
+
+  const pool = source.slice(0, 40);   // 只在命中次數較高的候選裡挑
 
   const pick = (score, want) => pool.reduce((best, c) =>
     ((want === 'min') ? score(c) < score(best) : score(c) > score(best)) ? c : best, pool[0]);
@@ -363,8 +429,9 @@ function countCrossings(img, mapFn, gStart, gEnd, samples) {
   const dx = gEnd[0] - gStart[0], dy = gEnd[1] - gStart[1];
   const len = Math.hypot(dx, dy) || 1;
   const normal = [-dy / len, dx / len];
+  const bowMax = Math.max(2.5, samples / 8 / 35);
   let best = -1;
-  for (let bow = -2.5; bow <= 2.5001; bow += 0.25) {
+  for (let bow = -bowMax; bow <= bowMax + 1e-6; bow += bowMax / 10) {
     const n = countCrossingsAtBow(img, mapFn, gStart, gEnd, samples, bow, normal);
     if (n > best) best = n;
   }
@@ -388,18 +455,24 @@ function traceTrack(img, mapFn, gStart, gEnd, nCells) {
   const len = Math.hypot(dx, dy) || 1;
   const normal = [-dy / len, dx / len];
 
-  // 粗掃再細掃：直接用 0.25 的間距掃 -2..2 要試 17 次，
-  // 而這個函式在搜尋網格尺寸時會被呼叫上百次。
-  // 先以 0.5 為間距粗掃，再在最佳值附近以 0.125 細掃，次數少一半、精度更好。
+  // 搜尋範圍必須隨軌道長度成長。
+  // 弓形的量測單位是「格」，而桶狀畸變讓直線鼓起來的幅度大致正比於軌道長度：
+  // 100 格的軌道大約鼓 2 格，234 格的軌道就會鼓到 5 格以上。
+  // 原本寫死 ±2 的時候，小網格沒問題，一換到 1920×1080 的實際尺寸
+  // （234 格寬）就整個追不到軌道，症狀是「所有設定都解不開」。
+  const bowMax = Math.max(2, nCells / 35);
+  const coarse = bowMax / 4;
+
+  // 粗掃再細掃，比一次掃完省一半次數而且精度更好
   let best = null;
   const tryBow = (bow) => {
     const r = traceTrackWithBow(img, mapFn, gStart, gEnd, nCells, bow, normal);
     if (r && (!best || r.score > best.score)) best = { ...r, bow };
   };
-  for (let bow = -2; bow <= 2.0001; bow += 0.5) tryBow(bow);
+  for (let bow = -bowMax; bow <= bowMax + 1e-6; bow += coarse) tryBow(bow);
   if (best) {
-    const c = best.bow;
-    for (const d of [-0.375, -0.25, -0.125, 0.125, 0.25, 0.375]) tryBow(c + d);
+    const c = best.bow, fine = coarse / 4;
+    for (const d of [-3, -2, -1, 1, 2, 3]) tryBow(c + d * fine);
   }
   if (!best || !best.anchorT) return null;
   return { anchorT: best.anchorT, measured: best.measured, bow: best.bow, normal, gStart, gEnd, nCells };
