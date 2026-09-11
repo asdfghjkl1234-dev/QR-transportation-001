@@ -12,6 +12,7 @@
 
 import {
   makeLayout, frameCapacity, sectorPlan, encodeSector, whitenSeed,
+  encodeMetaChunks,
 } from './format.js';
 import { buildFrameGrid, QUIET_CELLS } from './render.js';
 import { PALETTES } from './format.js';
@@ -24,7 +25,7 @@ let capacity = null;
 let cfg = null;
 let sessionId = 0;
 let frameSeq = 0;
-let metadataPayload = null;
+let metaChunks = null;   // metadata 切成數塊，一塊佔一個分區
 let sinceMetadata = 0;
 
 /** 每隔多少幀，在其中一個分區放入 metadata */
@@ -69,10 +70,13 @@ function gridToBitmap(grid, cols, rows, level, cellPx) {
 function produceFrame() {
   const seq = frameSeq++;
 
-  // 每 15 幀讓第 0 個分區改放 metadata。
+  // 每 15 幀讓最前面幾個分區改放 metadata。
   // 為什麼不另外做一種「metadata 幀」：那會浪費整整一幀。
-  // 只借用一個分區的話，同一幀的其他 11 個分區照常送資料。
-  const useMetadata = metadataPayload && (sinceMetadata >= METADATA_EVERY_FRAMES || seq === 0);
+  // 只借用前幾個分區的話，同一幀剩下的分區照常送資料。
+  //
+  // metadata 含整檔 SHA-256（64 個十六進位字元），全長約 150～250 bytes，
+  // 一個分區通常只有幾十 bytes 放不下，所以切成數塊分開送。
+  const useMetadata = metaChunks && (sinceMetadata >= METADATA_EVERY_FRAMES || seq === 0);
   if (useMetadata) sinceMetadata = 0; else sinceMetadata++;
 
   const symbols = [];
@@ -83,9 +87,8 @@ function produceFrame() {
     if (!plan) { symbols.push(new Uint8Array(s.cells.length)); continue; }
 
     let payload;
-    if (useMetadata && i === 0) {
-      payload = new Uint8Array(capacity.payloadPerSector);
-      payload.set(metadataPayload.subarray(0, payload.length));
+    if (useMetadata && i < metaChunks.length) {
+      payload = metaChunks[i];
     } else {
       // 每個分區承載一個噴泉碼編碼區塊
       payload = encoder.nextPacket().bytes;
@@ -133,13 +136,22 @@ self.onmessage = (e) => {
       systematic: cfg.systematic !== false,
     });
     // v3 的 metadata 直接放在分區裡，不走 v2 的封包內建機制
-    metadataPayload = new TextEncoder().encode(JSON.stringify({
+    const metaBytes = new TextEncoder().encode(JSON.stringify({
       name: msg.meta.name,
       type: msg.meta.type,
       size: msg.data.length,
       blockSize,
       sha256: sha256Hex(msg.data),
     }));
+    metaChunks = encodeMetaChunks(metaBytes, capacity.payloadPerSector);
+    if (!metaChunks || metaChunks.length >= capacity.sectorCount) {
+      self.postMessage({
+        type: 'error',
+        message: `分區太小，放不下 metadata（需要 ${metaChunks ? metaChunks.length : '?'} 個分區，`
+               + `全幀只有 ${capacity.sectorCount} 個）。請加大網格或減少分區數。`,
+      });
+      return;
+    }
 
     self.postMessage({
       type: 'ready',
@@ -148,6 +160,7 @@ self.onmessage = (e) => {
       payloadPerSector: capacity.payloadPerSector,
       sectorCount: capacity.sectorCount,
       bytesPerFrame: (capacity.sectorCount - 0) * blockSize,
+      metaChunks: metaChunks.length,
       dataCells: capacity.dataCells,
       frameW: (cfg.cols + QUIET_CELLS * 2) * cfg.cellPx,
       frameH: (cfg.rows + QUIET_CELLS * 2) * cfg.cellPx,

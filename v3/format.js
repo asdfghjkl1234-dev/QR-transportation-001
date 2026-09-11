@@ -612,3 +612,108 @@ export function frameCapacity(layout, level, redundancy = 0.25) {
     dataCells: layout.sectors.reduce((a, s) => a + s.cells.length, 0),
   };
 }
+
+/* =========================================================================
+ * Metadata 分塊
+ * =========================================================================
+ * metadata（檔名、MIME、檔案大小、區塊大小、整檔 SHA-256）是 JSON，
+ * 加上 64 個十六進位字元的雜湊之後約 150～250 bytes，
+ * 而一個分區只載得下幾十 bytes（實測 C8、100×64、4×3 分區時是 73 bytes）。
+ *
+ * 原本的做法是 subarray(0, payloadPerSector) 直接截斷，結果 JSON 永遠不完整，
+ * 接收端 JSON.parse 永遠失敗 —— 症狀是每一幀都解得開、分區成功率 100%、
+ * 進度卻永遠停在 0%，而且因為 metadata 缺席，連解碼器都開不起來。
+ *
+ * 改成把 metadata 切成數塊，一塊放一個分區（metadata 幀只用前幾個分區，
+ * 其餘照常送噴泉碼封包）。每塊自帶 magic、序號、總長與 CRC16，
+ * 所以就算中間掉了一塊，接收端也只是繼續等下一輪，不會拼出壞資料。
+ */
+
+/** metadata 分塊的標頭長度：magic(3) + idx(1) + count(1) + len(1) + total(2) */
+const META_HEADER = 8;
+/** 分塊尾端的 CRC16 長度 */
+const META_CRC = 2;
+/** 分塊的 magic，用來和噴泉碼封包區分（噴泉碼封包有自己的 magic 與 CRC32） */
+const META_MAGIC = [0x56, 0x33, 0x4d];   // 'V3M'
+
+/** 一個分區能放多少 metadata 位元組 */
+export function metaChunkCapacity(sectorPayloadSize) {
+  return sectorPayloadSize - META_HEADER - META_CRC;
+}
+
+/**
+ * 把 metadata 切成數個「剛好填滿一個分區」的分塊。
+ * @param {Uint8Array} bytes metadata 原始內容（通常是 UTF-8 的 JSON）
+ * @param {number} sectorPayloadSize 一個分區的酬載長度
+ * @returns {Uint8Array[]|null} 每個元素長度都等於 sectorPayloadSize；分區太小則回傳 null
+ */
+export function encodeMetaChunks(bytes, sectorPayloadSize) {
+  const per = metaChunkCapacity(sectorPayloadSize);
+  if (per < 8) return null;
+  const count = Math.ceil(bytes.length / per);
+  if (count > 255) return null;
+
+  const out = [];
+  for (let i = 0; i < count; i++) {
+    const slice = bytes.subarray(i * per, Math.min(bytes.length, (i + 1) * per));
+    const b = new Uint8Array(sectorPayloadSize);
+    b[0] = META_MAGIC[0]; b[1] = META_MAGIC[1]; b[2] = META_MAGIC[2];
+    b[3] = i; b[4] = count; b[5] = slice.length;
+    b[6] = (bytes.length >> 8) & 0xff; b[7] = bytes.length & 0xff;
+    b.set(slice, META_HEADER);
+    const crc = crc32(b, 0, META_HEADER + slice.length) & 0xffff;
+    b[META_HEADER + slice.length] = (crc >> 8) & 0xff;
+    b[META_HEADER + slice.length + 1] = crc & 0xff;
+    out.push(b);
+  }
+  return out;
+}
+
+/**
+ * 解析一個分區酬載，看它是不是 metadata 分塊。
+ * @returns {{idx:number, count:number, total:number, data:Uint8Array}|null}
+ */
+export function decodeMetaChunk(payload) {
+  if (!payload || payload.length < META_HEADER + META_CRC) return null;
+  if (payload[0] !== META_MAGIC[0] || payload[1] !== META_MAGIC[1] || payload[2] !== META_MAGIC[2]) return null;
+  const idx = payload[3], count = payload[4], len = payload[5];
+  const total = (payload[6] << 8) | payload[7];
+  if (count === 0 || idx >= count) return null;
+  if (META_HEADER + len + META_CRC > payload.length) return null;
+  const crc = crc32(payload, 0, META_HEADER + len) & 0xffff;
+  const got = (payload[META_HEADER + len] << 8) | payload[META_HEADER + len + 1];
+  if (crc !== got) return null;
+  return { idx, count, total, data: payload.subarray(META_HEADER, META_HEADER + len) };
+}
+
+/**
+ * 收集 metadata 分塊，湊齊就拼回原始位元組。
+ * 分塊會隨著每一輪 metadata 幀重複送出，所以掉了也只是多等一輪。
+ */
+export class MetaAssembler {
+  constructor() { this.chunks = null; this.count = 0; this.total = 0; }
+
+  /**
+   * @param {Uint8Array} payload 一個分區的酬載
+   * @returns {Uint8Array|null} 湊齊時回傳完整內容，否則 null
+   */
+  add(payload) {
+    const c = decodeMetaChunk(payload);
+    if (!c) return null;
+    // 總長或塊數變了代表換了一份 metadata（例如使用者重新開始傳），重來
+    if (!this.chunks || this.count !== c.count || this.total !== c.total) {
+      this.chunks = new Array(c.count).fill(null);
+      this.count = c.count; this.total = c.total;
+    }
+    this.chunks[c.idx] = Uint8Array.from(c.data);
+    if (this.chunks.some((x) => x === null)) return null;
+
+    const out = new Uint8Array(this.total);
+    let at = 0;
+    for (const part of this.chunks) {
+      out.set(part.subarray(0, Math.min(part.length, this.total - at)), at);
+      at += part.length;
+    }
+    return out;
+  }
+}

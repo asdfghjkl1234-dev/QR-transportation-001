@@ -392,5 +392,110 @@ section('11. 失真強度掃描（錯誤率對失真強度的曲線）');
 }
 
 /* ---------------------------------------------------------------------- */
+section('12. 端到端傳檔（第 2 階段驗收）：整份檔案走完編碼→失真→解碼→重組');
+{
+  // 這一節跑的是發送端與接收端實際用的那條路，只是把「相機拍螢幕」
+  // 換成模擬器、把 worker 換成同步呼叫：
+  //   LTEncoder2 取封包 → 每個分區一包 → encodeFrame → distort
+  //   → decodeFrame → 分區酬載 → decodePacketV2 → LTDecoder2 → 組回檔案
+  // 每一幀用不同的失真亂數種子（模擬手持晃動），並隨機丟掉兩成影格。
+  const cols = 100, rows = 64, level = 8, cellPx = 8;   // C8：每格 3 bit，整段測試才跑得完
+  const cfg = { cols, rows, level, cellPx, sectorsX: 4, sectorsY: 3, redundancy: 0.25 };
+  const layout = F.makeLayout(cols, rows, 4, 3);
+  const cap = F.frameCapacity(layout, level, 0.25);
+  const blockSize = cap.payloadPerSector - 15;   // 扣掉 v2 封包標頭
+
+  const fileBytes = randBytes(8 * 1024);
+  const fileHash = sha256Hex(fileBytes);
+  const sessionId = 0x4d2;
+  const enc = new LTEncoder2(fileBytes, blockSize, { sessionId, systematic: true, rng: mulberry32(7) });
+
+  const metaJson = new TextEncoder().encode(JSON.stringify({
+    name: 'test.bin', type: 'application/octet-stream',
+    size: fileBytes.length, blockSize, sha256: fileHash,
+  }));
+  // metadata 放不進一個分區（含 SHA-256 約 150～250 B），要切塊
+  const metaChunks = F.encodeMetaChunks(metaJson, cap.payloadPerSector);
+
+  let decoder = null;
+  const pending = [];
+  let metadata = null;
+  const asm = new F.MetaAssembler();
+  // 接收端 handleSectorPayload / startDecoderIfReady 的等價物
+  const startIfReady = () => {
+    if (decoder || !metadata || !pending.length) return;
+    decoder = new LTDecoder2({
+      sessionId: pending[0].sessionId, K: pending[0].K,
+      blockSize: metadata.blockSize, fileSize: metadata.size,
+    });
+    for (const p of pending) if (p.sessionId === decoder.sessionId) decoder.addPacket(p);
+    pending.length = 0;
+  };
+  const feed = (payload) => {
+    const pkt = decodePacketV2(payload);
+    if (pkt) {
+      if (!decoder) { pending.push(pkt); startIfReady(); return; }
+      if (pkt.sessionId === decoder.sessionId) decoder.addPacket(pkt);
+      return;
+    }
+    if (metadata) return;
+    const whole = asm.add(payload);
+    if (!whole) return;
+    try {
+      const m = JSON.parse(new TextDecoder().decode(whole));
+      if (!m || typeof m.size !== 'number' || typeof m.blockSize !== 'number') return;
+      metadata = m;
+      startIfReady();
+    } catch { /* 不是 JSON */ }
+  };
+
+  const drop = mulberry32(99);
+  const MAX_FRAMES = 45;
+  let sent = 0, received = 0, dropped = 0, sectorOk = 0, sectorTotal = 0;
+  let hint = null;
+  let sinceMeta = 0;
+
+  for (let seq = 0; seq < MAX_FRAMES && !(decoder && decoder.isComplete && metadata); seq++) {
+    const useMeta = (seq === 0 || sinceMeta >= 15);
+    sinceMeta = useMeta ? 0 : sinceMeta + 1;
+
+    const payloads = layout.sectors.map((s, i) => {
+      if (useMeta && i < metaChunks.length) return metaChunks[i];
+      const p = new Uint8Array(cap.payloadPerSector);
+      p.set(enc.nextPacket().bytes);
+      return p;
+    });
+    const { img } = encodeFrame(cfg, { sessionId, frameSeq: seq }, payloads);
+    sent++;
+
+    // 隨機丟掉兩成影格（相機沒對準、worker 全忙、快門橫跨兩幀…）
+    if (drop() < 0.2) { dropped++; continue; }
+
+    // 每一幀的失真都不一樣，模擬手持
+    const noisy = distort(img, { ...MEDIUM_DISTORTION, seed: 1000 + seq * 37 });
+    const res = decodeFrame(noisy, 0.25, hint ? { hint } : {});
+    if (!res.ok) continue;
+    received++;
+    hint = { cols: res.header.cols, rows: res.header.rows,
+             sectorsX: res.header.sectorsX, sectorsY: res.header.sectorsY };
+    sectorTotal += res.stats.sectorTotal;
+    sectorOk += res.stats.sectorOk;
+    for (const p of res.sectors) if (p) feed(p);
+  }
+
+  check('整份檔案重組完成', !!(decoder && decoder.isComplete && metadata),
+    `送出 ${sent} 幀、丟棄 ${dropped} 幀、成功解出 ${received} 幀`);
+  if (decoder && decoder.isComplete) {
+    const out = decoder.getFile();
+    check('還原內容與原檔逐位元組相同',
+      out.length === fileBytes.length && out.every((v, i) => v === fileBytes[i]));
+    check('SHA-256 與 metadata 記載相符', sha256Hex(out) === metadata.sha256, metadata.sha256.slice(0, 16) + '…');
+    info('噴泉碼開銷', `K=${decoder.K}，收到 ${decoder.stats.accepted} 個有效封包，開銷 ${(decoder.stats.accepted / decoder.K).toFixed(3)}×`);
+  }
+  info('分區成功率', `${(sectorOk / Math.max(1, sectorTotal) * 100).toFixed(1)}%（${sectorOk}/${sectorTotal}）`);
+  info('每幀有效酬載', `${(cap.sectorCount * blockSize / 1024).toFixed(2)} KB`);
+}
+
+/* ---------------------------------------------------------------------- */
 console.log(`\n\x1b[1m結果：${passed} 項通過，${failed} 項失敗\x1b[0m\n`);
 process.exit(failed === 0 ? 0 : 1);

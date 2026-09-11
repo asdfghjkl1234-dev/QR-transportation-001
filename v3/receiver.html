@@ -130,6 +130,7 @@
 
 <script type="module">
 import { LTDecoder2, decodePacketV2 } from '../v2/fountain2.js';
+import { MetaAssembler } from './format.js';
 import { sha256Hex } from '../fountain.js';
 
 const $ = (id) => document.getElementById(id);
@@ -143,7 +144,7 @@ const S = {
   hint: null,                 // 已知的網格尺寸，成功解出第一幀後就一直帶著
   redundancy: 0.25, threshold: 0.82,
   decoder: null, sessionId: null, ignoredSession: null, pendingSession: null,
-  pendingPackets: [], metadata: null,
+  pendingPackets: [], metadata: null, metaAsm: new MetaAssembler(),
   validFrames: 0, totalFrames: 0, failedFrames: 0,
   sectorTried: 0, sectorFailed: 0,
   rateWindow: [], byteWindow: [], grabWindow: [],
@@ -401,6 +402,7 @@ function handleSectorPayload(payload) {
     if (!S.decoder) {
       // 還不知道 blockSize / 檔案大小，先暫存
       if (S.pendingPackets.length < 5000) S.pendingPackets.push(pkt);
+      startDecoderIfReady();
       return;
     }
     if (pkt.sessionId !== S.decoder.sessionId) return;
@@ -408,13 +410,14 @@ function handleSectorPayload(payload) {
     return;
   }
 
-  // 不是封包 → 試試看是不是 metadata JSON
+  // 不是封包 → 試試看是不是 metadata 分塊。
+  // metadata 含整檔 SHA-256，長度遠超過一個分區，所以是切成數塊送來的，
+  // 要湊齊才拼得回完整 JSON。
   if (S.metadata) return;
+  const whole = S.metaAsm.add(payload);
+  if (!whole) return;
   try {
-    const text = new TextDecoder().decode(payload);
-    const end = text.indexOf('}');
-    if (end < 0) return;
-    const meta = JSON.parse(text.slice(0, end + 1));
+    const meta = JSON.parse(new TextDecoder().decode(whole));
     if (!meta || typeof meta.size !== 'number' || typeof meta.blockSize !== 'number') return;
     S.metadata = meta;
     updateMeta();
@@ -424,19 +427,32 @@ function handleSectorPayload(payload) {
       return;
     }
 
-    // 有了 blockSize 與檔案大小就能開解碼器，並把暫存的封包補進去
-    if (!S.decoder && S.pendingPackets.length) {
-      const K = S.pendingPackets[0].K;
-      S.decoder = new LTDecoder2({
-        sessionId: S.pendingPackets[0].sessionId, K,
-        blockSize: meta.blockSize, fileSize: meta.size,
-      });
-      for (const p of S.pendingPackets) {
-        if (p.sessionId === S.decoder.sessionId) S.decoder.addPacket(p);
-      }
-      S.pendingPackets.length = 0;
-    }
+    startDecoderIfReady();
   } catch { /* 不是 JSON 就忽略 */ }
+}
+
+/**
+ * 湊齊「metadata（blockSize / 檔案大小）」與「至少一個封包（K / sessionId）」
+ * 就開解碼器，並把暫存的封包全部補進去。
+ *
+ * 這個檢查必須在兩邊都做。原本只在 metadata 抵達時檢查一次，
+ * 而發送端的第 0 幀正好是「分區 0 放 metadata、其餘分區放封包」，
+ * 接收端又依分區編號依序處理 —— metadata 永遠排在封包前面，
+ * 檢查時暫存區還是空的，解碼器於是永遠不會被建立，
+ * 之後所有封包都只是無止盡地堆進暫存區。
+ * 症狀很隱蔽：每一幀都解得開、分區成功率 100%、進度卻永遠是 0%。
+ */
+function startDecoderIfReady() {
+  if (S.decoder || !S.metadata || !S.pendingPackets.length) return;
+  const first = S.pendingPackets[0];
+  S.decoder = new LTDecoder2({
+    sessionId: first.sessionId, K: first.K,
+    blockSize: S.metadata.blockSize, fileSize: S.metadata.size,
+  });
+  for (const p of S.pendingPackets) {
+    if (p.sessionId === S.decoder.sessionId) S.decoder.addPacket(p);
+  }
+  S.pendingPackets.length = 0;
 }
 
 function checkDone() {
@@ -669,7 +685,7 @@ function finish() {
  * 重置
  * ===================================================================== */
 function resetReception() {
-  S.decoder = null; S.pendingPackets = []; S.metadata = null;
+  S.decoder = null; S.pendingPackets = []; S.metadata = null; S.metaAsm = new MetaAssembler();
   S.sessionId = null; S.ignoredSession = null; S.pendingSession = null;
   S.validFrames = 0; S.totalFrames = 0; S.failedFrames = 0;
   S.sectorTried = 0; S.sectorFailed = 0;
