@@ -43,6 +43,39 @@ export function toGray(img) {
   return g;
 }
 
+/**
+ * 整數倍數縮圖（盒狀平均）。
+ *
+ * 定位標記的偵測成本和像素數成正比，而 1080p／1440p 的畫面在全解析度下
+ * 實測要 68 ms —— 那是整個解碼流程裡第二重的一塊，而它其實不需要這麼精細：
+ * 標記中心只要粗略對，後面的時序軌擬合會把幾何修到亞像素級。
+ * 縮一半就少四分之三的工作量。
+ *
+ * 用盒狀平均而不是最近鄰，因為最近鄰會讓 1:1:3:1:1 的跑道長度在
+ * 奇偶位置上跳動，反而害了比例判斷。
+ *
+ * @returns {{gray:Uint8ClampedArray, W:number, H:number, factor:number}}
+ */
+export function downscaleGray(gray, W, H, maxDim = 1100) {
+  const factor = Math.max(1, Math.floor(Math.max(W, H) / maxDim) + (Math.max(W, H) > maxDim ? 0 : 0));
+  if (factor <= 1 || Math.max(W, H) <= maxDim) return { gray, W, H, factor: 1 };
+  const w = Math.floor(W / factor), h = Math.floor(H / factor);
+  const out = new Uint8ClampedArray(w * h);
+  const area = factor * factor;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      let sum = 0;
+      const sy = y * factor, sx = x * factor;
+      for (let dy = 0; dy < factor; dy++) {
+        const row = (sy + dy) * W + sx;
+        for (let dx = 0; dx < factor; dx++) sum += gray[row + dx];
+      }
+      out[y * w + x] = (sum / area) | 0;
+    }
+  }
+  return { gray: out, W: w, H: h, factor };
+}
+
 /* =========================================================================
  * 1b. 自適應二值化
  * =========================================================================
@@ -202,6 +235,68 @@ export function findFinders(gray, W, H) {
 
   // 至少要被兩條掃描線同時找到，濾掉雜訊造成的偶然命中
   return clusters.filter((k) => k.n >= 2).sort((a, b) => b.n - a.n);
+}
+
+/**
+ * 在全解析度影像上精修一個定位標記的中心。
+ *
+ * 為什麼需要這一步：標記偵測是在縮圖上做的（省四分之三的時間），
+ * 但縮圖同時把中心位置的精度也砍成一半。實測 234×129 的 C8 畫面
+ * （格子只有 7 px）因此從「格子錯誤 0.05%、分區 100%」退到
+ * 「0.81%、分區 92%」—— 掉到驗收標準以下。
+ *
+ * 四個角的位置是整個幾何校正的起點，起點差半格，時序軌就可能追錯，
+ * 而精修的成本只有「四個小視窗」，幾乎免費。
+ *
+ * 做法和偵測時一致：在視窗內用局部門檻二值化，沿水平與垂直方向
+ * 各掃幾條線找 1:1:3:1:1，取所有命中的平均。
+ *
+ * @returns {{x:number,y:number,size:number,n:number}} 精修後的標記（失敗時原樣回傳）
+ */
+function refineFinderCenter(gray, W, H, cand) {
+  const half = Math.max(6, Math.ceil(cand.size * 4.5));
+  const cx = Math.round(cand.x), cy = Math.round(cand.y);
+  const x0 = Math.max(0, cx - half), x1 = Math.min(W - 1, cx + half);
+  const y0 = Math.max(0, cy - half), y1 = Math.min(H - 1, cy + half);
+  const w = x1 - x0 + 1, h = y1 - y0 + 1;
+  if (w < 7 || h < 7) return cand;
+
+  // 局部門檻：標記本身就是純黑白，視窗裡的最暗與最亮取中點即可
+  let lo = 255, hi = 0;
+  for (let y = y0; y <= y1; y++) {
+    const row = y * W;
+    for (let x = x0; x <= x1; x++) {
+      const v = gray[row + x];
+      if (v < lo) lo = v;
+      if (v > hi) hi = v;
+    }
+  }
+  if (hi - lo < 30) return cand;          // 對比太低，別亂修
+  const thr = (lo + hi) / 2;
+
+  const xs = [], ys = [], sizes = [];
+  const span = Math.max(1, Math.round(cand.size));   // 掃描線取中心附近 ±1 格
+  for (let dy = -span; dy <= span; dy++) {
+    const y = cy + dy;
+    if (y < y0 || y > y1) continue;
+    const row = y * W;
+    for (const c of scanLine((i) => (gray[row + x0 + i] < thr ? 1 : 0), w)) {
+      if (Math.abs(x0 + c.center - cand.x) > cand.size * 2) continue;
+      xs.push(x0 + c.center); sizes.push(c.size);
+    }
+  }
+  for (let dx = -span; dx <= span; dx++) {
+    const x = cx + dx;
+    if (x < x0 || x > x1) continue;
+    for (const c of scanLine((i) => (gray[(y0 + i) * W + x] < thr ? 1 : 0), h)) {
+      if (Math.abs(y0 + c.center - cand.y) > cand.size * 2) continue;
+      ys.push(y0 + c.center); sizes.push(c.size);
+    }
+  }
+  if (!xs.length || !ys.length) return cand;
+
+  const mean = (a) => a.reduce((p, q) => p + q, 0) / a.length;
+  return { x: mean(xs), y: mean(ys), size: mean(sizes), n: cand.n };
 }
 
 /**
@@ -540,29 +635,6 @@ function trackCorrespondences(track, mapFn) {
  * 數量遠超過 8 個未知數，因此擬合非常穩定。
  */
 
-/** 用最小平方法從 n≥4 組對應點求單應性 */
-function fitHomographyLS(src, dst) {
-  const n = src.length;
-  if (n < 4) return null;
-  // 建立正規方程組 (AᵀA) h = Aᵀb，A 是 2n×8
-  const AtA = Array.from({ length: 8 }, () => new Array(8).fill(0));
-  const Atb = new Array(8).fill(0);
-
-  const addRow = (row, rhs) => {
-    for (let i = 0; i < 8; i++) {
-      for (let j = 0; j < 8; j++) AtA[i][j] += row[i] * row[j];
-      Atb[i] += row[i] * rhs;
-    }
-  };
-  for (let i = 0; i < n; i++) {
-    const [x, y] = src[i], [u, v] = dst[i];
-    addRow([x, y, 1, 0, 0, 0, -u * x, -u * y], u);
-    addRow([0, 0, 0, x, y, 1, -v * x, -v * y], v);
-  }
-  const h = solveLinear(AtA, Atb);
-  if (!h || h.some((q) => !isFinite(q))) return null;
-  return [h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7], 1];
-}
 
 /**
  * 擬合「單應性 + 徑向畸變」模型。
@@ -576,21 +648,78 @@ function fitHomographyLS(src, dst) {
  * @returns {{k:number, h:number[], err:number}|null}
  */
 function fitOnce(corr, cx, cy, norm) {
-  const src = corr.map((c) => c.g);
+  // 這個函式是整個解碼流程最貴的一塊（2304×1296 的畫面實測 98 ms／幀，
+  // 佔全程的一半），所以寫法刻意攤平：
+  //
+  //   1. 對應點先拆成平坦的 Float64Array，k 的每一步都不再配置任何物件。
+  //      原本每個 k 都用 corr.map() 生一組新陣列 —— 101 個 k × 200 個點
+  //      等於每幀丟掉兩萬個暫時陣列，光 GC 就很可觀。
+  //   2. 正規方程組只算上三角（AᵀA 是對稱的），並且利用兩條列各有三個零
+  //      的結構：每條列只有 5 個非零項，一個對應點只要 30 次乘法，
+  //      而不是攤平前的 128 次。
+  //
+  // 也試過把均勻掃描換成「粗掃 + 黃金分割」（約 30 次擬合，快一倍），
+  // 但那會讓結果變差：迭代之間是耦合的（這一輪的取樣器決定下一輪追到的軌道），
+  // 殘差對 k 的曲線又不是乾淨的單谷，黃金分割收到的是另一個解 ——
+  // 實測 234×129 的 C8 畫面殘差 0.54→0.76 px、格子錯誤 0.06%→0.98%。
+  // 少算一點反而更準，是不能接受的交換，所以保留均勻掃描，只把每一步變便宜。
+  const n = corr.length;
+  const gx = new Float64Array(n), gy = new Float64Array(n);
+  const dxn = new Float64Array(n), dyn = new Float64Array(n), r2 = new Float64Array(n);
+  for (let i = 0; i < n; i++) {
+    gx[i] = corr[i].g[0]; gy[i] = corr[i].g[1];
+    const dx = (corr[i].p[0] - cx) / norm, dy = (corr[i].p[1] - cy) / norm;
+    dxn[i] = dx; dyn[i] = dy; r2[i] = dx * dx + dy * dy;
+  }
+
+  // AᵀA 的上三角（8×8）與 Aᵀb
+  const M = new Float64Array(64);
+  const Atb = new Float64Array(8);
+  const ux = new Float64Array(n), uy = new Float64Array(n);
+
+  /** 累加一條只有 5 個非零項的列：idx[] 是欄號，val[] 是值 */
+  const idx1 = [0, 1, 2, 6, 7], idx2 = [3, 4, 5, 6, 7];
+  const v = new Float64Array(5);
+  const addSparse = (idxs, rhs) => {
+    for (let a = 0; a < 5; a++) {
+      const ia = idxs[a], va = v[a];
+      Atb[ia] += va * rhs;
+      for (let b = a; b < 5; b++) M[ia * 8 + idxs[b]] += va * v[b];
+    }
+  };
+
   let best = null;
   for (let k = -0.20; k <= 0.2001; k += 0.004) {
     // 把實測影像點去畸變（正向是 r→r(1+k·r²)，這裡取一階反解）
-    const dst = corr.map((c) => {
-      const dx = (c.p[0] - cx) / norm, dy = (c.p[1] - cy) / norm;
-      const f = 1 + k * (dx * dx + dy * dy);
-      return [cx + (dx / f) * norm, cy + (dy / f) * norm];
+    for (let i = 0; i < n; i++) {
+      const f = 1 + k * r2[i];
+      ux[i] = cx + (dxn[i] / f) * norm;
+      uy[i] = cy + (dyn[i] / f) * norm;
+    }
+
+    M.fill(0); Atb.fill(0);
+    for (let i = 0; i < n; i++) {
+      const x = gx[i], y = gy[i], u = ux[i], w2 = uy[i];
+      v[0] = x; v[1] = y; v[2] = 1; v[3] = -u * x; v[4] = -u * y;
+      addSparse(idx1, u);
+      v[0] = x; v[1] = y; v[2] = 1; v[3] = -w2 * x; v[4] = -w2 * y;
+      addSparse(idx2, w2);
+    }
+    // 補回下三角（solveLinear 需要完整矩陣）
+    const A = Array.from({ length: 8 }, (_, i) => {
+      const row = new Array(8);
+      for (let j = 0; j < 8; j++) row[j] = j >= i ? M[i * 8 + j] : M[j * 8 + i];
+      return row;
     });
-    const h = fitHomographyLS(src, dst);
-    if (!h) continue;
+    const h8 = solveLinear(A, Array.from(Atb));
+    if (!h8 || h8.some((q) => !isFinite(q))) continue;
+    const h = [h8[0], h8[1], h8[2], h8[3], h8[4], h8[5], h8[6], h8[7], 1];
+
     let err = 0;
-    for (let i = 0; i < src.length; i++) {
-      const q = applyH(h, src[i][0], src[i][1]);
-      err += (q[0] - dst[i][0]) ** 2 + (q[1] - dst[i][1]) ** 2;
+    for (let i = 0; i < n; i++) {
+      const q = applyH(h, gx[i], gy[i]);
+      const ex = q[0] - ux[i], ey = q[1] - uy[i];
+      err += ex * ex + ey * ey;
     }
     if (!best || err < best.err) best = { k, h, err };
   }
@@ -774,11 +903,22 @@ export function detectFrame(img, layoutFactory, opts = {}) {
   const W = img.width, H = img.height;
 
   // --- 找定位標記 ---
-  const finders = findFinders(gray, W, H);
-  const top4 = pickCorners(finders);
+  // 在縮圖上找，找到之後把座標與尺寸乘回去。
+  // 標記中心的誤差會被後面的時序軌擬合吃掉，而成本省了四分之三。
+  const small = downscaleGray(gray, W, H);
+  const rawFinders = findFinders(small.gray, small.W, small.H);
+  const finders = small.factor === 1 ? rawFinders : rawFinders.map((c) => ({
+    x: (c.x + 0.5) * small.factor - 0.5,
+    y: (c.y + 0.5) * small.factor - 0.5,
+    size: c.size * small.factor,
+    n: c.n,
+  }));
+  let top4 = pickCorners(finders);
   if (!top4) {
     return { ok: false, reason: `定位標記候選不足（共 ${finders.length} 個）`, finders };
   }
+  // 只精修真正要用的那四個（精修全部候選是白花時間）
+  if (small.factor > 1) top4 = top4.map((c) => refineFinderCenter(gray, W, H, c));
 
   // --- 決定四個角分別是哪一個方位 ---
   //
@@ -942,12 +1082,18 @@ function tryDecodeWith(img, gray, corner, layoutFactory, threshold, hint = null,
 
     // 標頭通過 CRC 且尺寸自洽 → 這組角落與尺寸是對的
     const real = layoutFactory(header.cols, header.rows, header.sectorsX, header.sectorsY);
-    const hh = makeH(header.cols, header.rows);
-    const realSampler = buildSampler(img, hh, real);
-    const sampled = sampleAllCells(img, realSampler, real, header.paletteLevel, threshold);
+
+    // 取樣器可以直接重用。
+    //
+    // 上面已經檢查過 header.cols/rows 等於這組候選的 cols/rows，
+    // 所以單應性完全相同；而幾何校正只用到定位標記、時序軌與色票條的位置，
+    // 這些都只取決於 cols/rows，跟分區怎麼切無關。
+    // 原本這裡又建了一次取樣器，那是整個解碼流程最貴的一步
+    // （2304×1296 實測 130 ms），白做一遍等於把解碼時間加倍。
+    const sampled = sampleAllCells(img, sampler, real, header.paletteLevel, threshold);
     return {
       ok: true, header, layout: real, ...sampled,
-      homography: hh, sampler: realSampler, refined: realSampler.refined, corners: corner,
+      homography: h, sampler, refined: sampler.refined, corners: corner,
     };
   };
 
