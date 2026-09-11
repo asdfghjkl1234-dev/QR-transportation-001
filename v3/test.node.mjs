@@ -381,11 +381,14 @@ section('11. 失真強度掃描（錯誤率對失真強度的曲線）');
     info(`C${level} ${key}`, out.join('  '));
   };
   info('格式', '失真值:格子錯誤率/分區成功率');
-  sweep('blur', [0, 0.8, 1.5, 2.5], 4);
-  sweep('noise', [0, 6, 15, 30], 4);
-  sweep('barrel', [0, 0.06, 0.12, 0.2], 4);
-  sweep('rotate', [0, 8, 15, 25], 4);
-  sweep('glare', [0, 0.25, 0.5, 0.8], 4);
+  for (const level of [4, 8]) {
+    sweep('blur', [0, 0.8, 1.5, 2.5], level);
+    sweep('noise', [0, 6, 15, 30], level);
+    sweep('barrel', [0, 0.06, 0.12, 0.2], level);
+    sweep('rotate', [0, 8, 15, 25], level);
+    sweep('glare', [0, 0.25, 0.5, 0.8], level);
+    sweep('gradient', [0, 0.22, 0.4, 0.6], level);
+  }
 }
 
 /* ---------------------------------------------------------------------- */

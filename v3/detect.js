@@ -228,8 +228,21 @@ export function pickCorners(clusters) {
   //
   // 同一張圖裡所有標記的格子大小應該相近（桶狀畸變頂多差個兩三成），
   // 所以用中位數當基準，保留 0.5～2 倍的候選，寬鬆但足以踢掉離譜的。
-  const sizes = clusters.map((c) => c.size).sort((a, b) => a - b);
-  const medSize = sizes[sizes.length >> 1];
+  //
+  // 中位數要「加權」，權重取 n（被幾條掃描線同時確認）。
+  // 純中位數在高雜訊下會反過來害事：雜訊會生出一堆 size≈1.4 的假標記，
+  // 數量一旦超過真標記，中位數就被拉到 1.4，真標記反而被當成離群值踢掉
+  // （實測 noise=22 就會發生，四個角全軍覆沒）。
+  // 但真假標記的 n 差距極大 —— 真的 17～19，假的 2～3 ——
+  // 因為一個模組大小 s 的標記高度有 7s 像素，本來就會被很多條掃描線掃到。
+  // 用 n 當權重，真標記自然主導中位數。
+  const byS = [...clusters].sort((a, b) => a.size - b.size);
+  const totalW = byS.reduce((t, c) => t + c.n, 0);
+  let acc = 0, medSize = byS[byS.length >> 1].size;
+  for (const c of byS) {
+    acc += c.n;
+    if (acc >= totalW / 2) { medSize = c.size; break; }
+  }
   const consistent = clusters.filter((c) => c.size >= medSize * 0.5 && c.size <= medSize * 2);
   const source = consistent.length >= 4 ? consistent : clusters;
 
@@ -889,9 +902,6 @@ function tryDecodeWith(img, gray, corner, layoutFactory, threshold, hint = null,
   // 所以如果呼叫端給了提示（接收端在第一幀成功之後就會一直給），
   // 就把提示排在最前面 —— 命中時整個搜尋直接跳過。
   const deltas = [];
-  if (hint && hint.cols && hint.rows) {
-    deltas.push([hint.cols - estCols, hint.rows - estRows, -1]);
-  }
   // 搜尋順序很重要，因為每一組候選都要重建一次幾何校正取樣器。
   //
   // 這裡的偏差是有方向性的：桶狀畸變把定位標記往外推，也把它的「格子大小」
@@ -909,41 +919,61 @@ function tryDecodeWith(img, gray, corner, layoutFactory, threshold, hint = null,
   }
   deltas.sort((p, q) => p[2] - q[2]);
 
+  /**
+   * 試一組網格尺寸：建幾何校正取樣器 → 讀標頭 → 自洽檢查 → 取樣全部格子。
+   * @returns {object|null} 成功的完整結果，或 null（這組不對）
+   */
+  const attempt = (cols, rows, quick) => {
+    const h = makeH(cols, rows);
+    if (!h) return null;
+
+    let layout;
+    try { layout = layoutFactory(cols, rows, 4, 3); } catch { return null; }
+    budget.left--;
+
+    // 先用時序軌校正幾何，再讀標頭。
+    // 順序很重要：桶狀畸變會讓畫面中段偏掉快一格，
+    // 沒校正就直接讀標頭的話，在有鏡頭畸變時必定失敗。
+    const sampler = buildSampler(img, h, layout);
+
+    const header = readHeader(img, sampler, layout, quick);
+    if (!header) return null;
+    if (header.cols !== cols || header.rows !== rows) return null;   // 自我一致性檢查
+
+    // 標頭通過 CRC 且尺寸自洽 → 這組角落與尺寸是對的
+    const real = layoutFactory(header.cols, header.rows, header.sectorsX, header.sectorsY);
+    const hh = makeH(header.cols, header.rows);
+    const realSampler = buildSampler(img, hh, real);
+    const sampled = sampleAllCells(img, realSampler, real, header.paletteLevel, threshold);
+    return {
+      ok: true, header, layout: real, ...sampled,
+      homography: hh, sampler: realSampler, refined: realSampler.refined, corners: corner,
+    };
+  };
+
+  // 有提示時，先把提示的尺寸「用盡」再說 —— 快速模式和完整位移搜尋都試。
+  //
+  // 之前是把提示插在候選清單最前面，然後整份清單先跑一遍快速模式、
+  // 再跑一遍完整模式。問題是快速模式那一遍就把工作量預算用光了，
+  // 提示的完整模式永遠輪不到。症狀很好認：幾何殘差明明只有 0.69px
+  // （完全正常），卻回報「畫面品質太差」——
+  // 其實只差那 11 種取樣位移裡的某一種就能讓標頭 CRC 通過。
+  // 提示的完整搜尋只要 11 次讀標頭，成本遠低於掃完整份候選清單。
+  if (hint && hint.cols && hint.rows) {
+    const r = attempt(hint.cols, hint.rows, false);
+    if (r) return r;
+  }
+
   // 兩階段：先用快速標頭讀取掃一遍（絕大多數情況這裡就中了），
   // 全部失敗才用完整的位移搜尋再掃一遍。
   for (const quick of [true, false]) {
-   for (const [dc, dr] of deltas) {
-    {
+    for (const [dc, dr] of deltas) {
       const cols = estCols + dc, rows = estRows + dr;
-      const h = makeH(cols, rows);
-      if (!h) continue;
-
+      if (hint && cols === hint.cols && rows === hint.rows) continue;   // 上面試過了
       if (budget.left <= 0) return { ok: false, reason: '超出工作量預算' };
-      let layout;
-      try { layout = layoutFactory(cols, rows, 4, 3); } catch { continue; }
-      budget.left--;
-
-      // 先用時序軌校正幾何，再讀標頭。
-      // 順序很重要：桶狀畸變會讓畫面中段偏掉快一格，
-      // 沒校正就直接讀標頭的話，在有鏡頭畸變時必定失敗。
-      const sampler = buildSampler(img, h, layout);
-
-      const header = readHeader(img, sampler, layout, quick);
-      if (!header) continue;
-
-      if (header.cols !== cols || header.rows !== rows) continue;   // 自我一致性檢查
-
-      // 標頭通過 CRC 且尺寸自洽 → 這組角落與尺寸是對的
-      const real = layoutFactory(header.cols, header.rows, header.sectorsX, header.sectorsY);
-      const hh = makeH(header.cols, header.rows);
-      const realSampler = buildSampler(img, hh, real);
-      const sampled = sampleAllCells(img, realSampler, real, header.paletteLevel, threshold);
-      return {
-        ok: true, header, layout: real, ...sampled,
-        homography: hh, sampler: realSampler, refined: realSampler.refined, corners: corner,
-      };
+      const r = attempt(cols, rows, quick);
+      if (r) return r;
     }
-   }
   }
   return { ok: false, reason: '找不到自洽的網格尺寸' };
 }
@@ -989,17 +1019,66 @@ function readHeaderAt(img, sampler, layout, ox, oy) {
   // 二值化門檻：取「最暗的 10%」與「最亮的 10%」各自的平均，再取中點。
   // 不用中位數是因為標頭的 0/1 比例不見得平均（實測全黑格超過一半，
   // 中位數會直接落在 0 上）；不用單純的 min/max 是因為那對雜訊與反光太敏感。
-  const sorted = [...lums].sort((p, q) => p - q);
-  const dec = Math.max(1, Math.floor(sorted.length / 10));
-  let lowSum = 0, highSum = 0;
-  for (let i = 0; i < dec; i++) {
-    lowSum += sorted[i];
-    highSum += sorted[sorted.length - 1 - i];
+  const midOf = (arr) => {
+    const sorted = [...arr].sort((p, q) => p - q);
+    const dec = Math.max(1, Math.floor(sorted.length / 10));
+    let lowSum = 0, highSum = 0;
+    for (let i = 0; i < dec; i++) {
+      lowSum += sorted[i];
+      highSum += sorted[sorted.length - 1 - i];
+    }
+    const low = lowSum / dec, high = highSum / dec;
+    return { mid: (low + high) / 2, spread: high - low };
+  };
+
+  // 二值化門檻要「就地取材」，不能整條標頭共用一個。
+  //
+  // 反光是局部的：亮斑底下的黑格實測會亮到 176，而畫面另一端的白格只有 195。
+  // 單一門檻不管切在哪裡都會錯一大片（實測 glare=0.5 錯 69/384 位元，
+  // 連三重多數決都救不回來）。試過改用 Otsu，結果更糟 ——
+  // 黑格本身就被反光切成「暗黑」與「亮黑」兩群，Otsu 會去切那一刀。
+  // 也試過滑動視窗，但反光半徑約 26 格，視窗要夠寬才包得到黑白兩色，
+  // 一寬就又跨出了反光範圍，兩頭不討好。
+  //
+  // 正解是用「同一個地方的已知黑與白」當基準 —— 上色票條就緊貼在標頭上方，
+  // 它把整個調色盤沿著 x 週期性重複排一遍，所以任何一段連續 8 格裡
+  // 必定同時有黑和白（C4 是 4 色、C8 是 8 色，都不超過 8）。
+  // 取該段的最暗與最亮當成該欄的黑白基準，兩者的中點就是門檻。
+  // 反光同時打在色票條和標頭上，基準自然跟著抬高，門檻就跟著走。
+  const { barTop, timingLeft, timingRight } = layout;
+  const x0 = timingLeft + 1, x1 = timingRight - 1;
+  const barLum = new Float64Array(x1 - x0 + 1);
+  for (let x = x0; x <= x1; x++) {
+    const [px, py] = sampler.map(x + 0.5, barTop + 0.5 + oy);
+    const rgb = sampleCell(img, px, py, cellRadius(sampler, x, barTop));
+    barLum[x - x0] = (rgb[0] + rgb[1] + rgb[2]) / 3;
   }
-  const mid = (lowSum / dec + highSum / dec) / 2;
+  // 每一欄的黑白基準：以該欄為中心取 ±8 格的最小值與最大值
+  const REF_WIN = 8;
+  const colMid = new Float64Array(barLum.length);
+  for (let i = 0; i < barLum.length; i++) {
+    let lo = Infinity, hi = -Infinity;
+    for (let j = Math.max(0, i - REF_WIN); j <= Math.min(barLum.length - 1, i + REF_WIN); j++) {
+      if (barLum[j] < lo) lo = barLum[j];
+      if (barLum[j] > hi) hi = barLum[j];
+    }
+    colMid[i] = (lo + hi) / 2;
+  }
+
+  // 色票條本身要是被遮住或糊掉（動態範圍太小就是徵兆），就退回全域門檻
+  const globalMid = midOf(lums);
+  let barLo = Infinity, barHi = -Infinity;
+  for (const v of barLum) { if (v < barLo) barLo = v; if (v > barHi) barHi = v; }
+  const barUsable = barHi - barLo >= globalMid.spread * 0.4;
 
   const bits = new Uint8Array(need);
-  for (let i = 0; i < need; i++) bits[i] = lums[i] > mid ? 1 : 0;
+  for (let i = 0; i < need; i++) {
+    const c = cells[i];
+    const mid = barUsable
+      ? colMid[Math.max(0, Math.min(colMid.length - 1, c.x - x0))]
+      : globalMid.mid;
+    bits[i] = lums[i] > mid ? 1 : 0;
+  }
 
   return decodeHeader(headerMajorityVote(bits));
 }
