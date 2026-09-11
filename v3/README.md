@@ -17,11 +17,11 @@ v1 在 [`../`](../)（QR + 噴泉碼，5～15 KB/s），v2 在 [`../v2/`](../v2/
 | `receiver.html` | 接收端（相機、worker 工作池、逐分區疊圖、即時統計與建議） |
 | `encoder-worker.js` / `decoder-worker.js` | 兩端的工作執行緒 |
 | `benchmark.html` | 各設定的實測成本，以及與 libcimbar 的格式對照 |
-| `test.node.mjs` | Node 測試，60 項 |
+| `test.node.mjs` | Node 測試，61 項 |
 
 ```sh
 npx serve -l 8080 .                   # 在專案根目錄執行
-node v3/test.node.mjs                 # 60 項測試（約 1 分 45 秒）
+node v3/test.node.mjs                 # 61 項測試（約 1 分 45 秒）
 ```
 
 * 模擬器：<http://localhost:8080/v3/simulator.html>
@@ -426,7 +426,7 @@ libcimbar 為 MPL-2.0 授權，**本專案未使用其任何程式碼**，
 ## 測試
 
 ```sh
-node v3/test.node.mjs        # 60 項，約 1 分 45 秒
+node v3/test.node.mjs        # 61 項，約 1 分 45 秒
 ```
 
 | 節 | 內容 |
