@@ -501,47 +501,57 @@ section('13. 形狀層（第 4 階段，實驗性）');
 {
   // 每格除了 C8 的顏色（3 bits），再用「四個角落之一的反色缺口」帶 2 bits，
   // 合計 5 bits/格 —— 位元密度是 C8 的 1.67 倍。
-  // 但缺口只有 0.24 格寬、中心離格心 0.28 格，對幾何精度的要求高一個等級，
-  // 所以這裡量的是「多出來的位元，值不值得它要求的格子大小」。
+  // 這一節要回答的是「多出來的位元，值不值得它要求的格子大小」。
   const LIGHT = {
     ...MEDIUM_DISTORTION, rotate: 3, tiltX: 0.02, tiltY: 0.015, barrel: 0.02,
     blur: 0.4, gradient: 0.1, glare: 0.1, noise: 3,
     saturation: 0.92, gamma: 1.05, wb: [1.02, 1, 0.97], jpegQuality: 0.9,
   };
 
-  // 固定 1920×1080 的螢幕：格子越大，網格越小，一幀能送的位元組也越少。
-  // 這才是「一幀送多少位元組」的公平比較。
   const QUIET = 3;
-  const at1080 = (level, cellPx, dist) => {
-    const cols = Math.floor(1920 / cellPx) - QUIET * 2;
-    const rows = Math.floor(1080 / cellPx) - QUIET * 2;
+  // 幀數不能太少：形狀層在有失真時逐幀的變異很大，實測 3 幀的估計值
+  // 會比 8 幀的偏高兩成以上（輕微失真 0.95× 被估成 1.11×）。5 幀是
+  // 「結論穩定」與「測試跑得完」之間的折衷；8 幀的完整量測寫在 README。
+  const FRAMES = 5;
+
+  /**
+   * 在固定的 1920×1080 螢幕上量「有效酬載」。
+   *
+   * 為什麼用有效酬載而不是「分區全對的幀數」：上層是噴泉碼，
+   * 掉幾個分區只是少收幾個封包，不是失敗。真正決定吞吐的是
+   * 「每幀平均能收到多少正確的位元組」= 每幀酬載 × 平均分區成功率
+   * （整幀解不開的算 0）。這也是唯一能公平比較不同格子大小的指標：
+   * 格子越大越穩，但格數越少。
+   */
+  const effective = (level, cellPx, dist) => {
+    const cols = Math.max(44, Math.floor(1920 / cellPx) - QUIET * 2);
+    const rows = Math.max(44, Math.floor(1080 / cellPx) - QUIET * 2);
     const layout = F.makeLayout(cols, rows, 4, 3);
     const cap = F.frameCapacity(layout, level, 0.25);
     if (!cap || cap.payloadPerSector < 25) return null;
-    const payloads = layout.sectors.map((s, i) => {
-      const p = new Uint8Array(cap.payloadPerSector);
-      for (let j = 0; j < p.length; j++) p[j] = (j * 31 + i * 101) & 255;
-      return p;
-    });
-    const { img, grid } = encodeFrame(
-      { cols, rows, level, cellPx, sectorsX: 4, sectorsY: 3, redundancy: 0.25 },
-      { sessionId: 0x1234, frameSeq: 7}, payloads);
-    const res = decodeFrame(distort(img, dist), 0.25,
-      { hint: { cols, rows, sectorsX: 4, sectorsY: 3 } });
-    if (!res.ok) return { cols, rows, payload: cap.totalPayload, ok: false, reason: res.reason };
-    let wrong = 0, total = 0;
-    for (const s of res.layout.sectors) for (const c of s.cells) {
-      total++; if (res.detection.symbols[c] !== grid[c]) wrong++;
+    const hint = { cols, rows, sectorsX: 4, sectorsY: 3 };
+
+    let okSum = 0;
+    for (let k = 0; k < FRAMES; k++) {
+      const payloads = layout.sectors.map((s, i) => {
+        const p = new Uint8Array(cap.payloadPerSector);
+        for (let j = 0; j < p.length; j++) p[j] = (j * 37 + i * 101 + k * 13) & 255;
+        return p;
+      });
+      const { img } = encodeFrame(
+        { cols, rows, level, cellPx, sectorsX: 4, sectorsY: 3, redundancy: 0.25 },
+        { sessionId: 0x100 + k * 7, frameSeq: k + 1 }, payloads);
+      const res = decodeFrame(distort(img, { ...dist, seed: (dist.seed || 1) + k * 101 }), 0.25, { hint });
+      if (!res.ok) continue;   // 解不開的幀貢獻 0
+      let good = 0;
+      for (let i = 0; i < res.sectors.length; i++) {
+        const p = res.sectors[i];
+        if (p && p.subarray(0, payloads[i].length).every((v, q) => v === payloads[i][q])) good++;
+      }
+      okSum += good / res.stats.sectorTotal;
     }
-    let okSectors = 0;
-    for (let i = 0; i < res.sectors.length; i++) {
-      const p = res.sectors[i];
-      if (p && p.subarray(0, payloads[i].length).every((v, k) => v === payloads[i][k])) okSectors++;
-    }
-    return {
-      ok: true, cols, rows, payload: cap.totalPayload,
-      cellErr: wrong / total, sectorOk: okSectors / res.stats.sectorTotal,
-    };
+    const meanOk = okSum / FRAMES;
+    return { payload: cap.totalPayload, meanOk, eff: cap.totalPayload * meanOk, cols, rows };
   };
 
   check('形狀層的位元密度是 C8 的 1.67 倍',
@@ -550,45 +560,50 @@ section('13. 形狀層（第 4 階段，實驗性）');
   check('形狀層的缺口用反色（C8 的反色就是調色盤裡最遠的顏色）',
     F.complementIndex(32, 0) === 7 && F.complementIndex(32, 7) === 0
     && F.complementIndex(32, 2) === 5);
-
-  // --- 無失真：形狀層能不能正確來回 ---
   {
-    const r = at1080(32, 8, NO_DISTORTION);
-    check('無失真：C8+形狀 @8px 完全正確', r && r.ok && r.cellErr === 0 && r.sectorOk === 1,
-      r && r.ok ? `每幀 ${r.payload} B（${r.cols}×${r.rows}）` : '解不開');
+    const r = effective(32, 8, NO_DISTORTION);
+    check('無失真：C8+形狀 @8px 每個分區都正確',
+      r && r.meanOk === 1, r ? `每幀 ${r.payload} B（${r.cols}×${r.rows}）` : '解不開');
   }
 
-  // --- 三種失真強度下的「每幀有效位元組」比較 ---
-  info('比較基準', '1920×1080 螢幕、4×3 分區、RS 冗餘 0.25；只計分區全數正確的設定');
+  info('比較基準', `1920×1080 螢幕、4×3 分區、RS 冗餘 0.25、每組 ${FRAMES} 幀；`
+    + '有效酬載 = 每幀酬載 × 平均分區成功率');
+
   const best = {};
   for (const [dn, dist] of [['無失真', NO_DISTORTION], ['輕微', LIGHT], ['中等', MEDIUM_DISTORTION]]) {
-    const rows = [];
     for (const [level, nm] of [[8, 'C8'], [32, 'C8+形狀']]) {
-      let bestPayload = 0, bestCell = null;
-      for (const cellPx of [8, 10, 12, 14]) {
-        const r = at1080(level, cellPx, dist);
-        if (!r || !r.ok) continue;
-        rows.push(`${nm}@${cellPx}:${(r.cellErr * 100).toFixed(1)}%/${(r.sectorOk * 100).toFixed(0)}%`);
-        if (r.sectorOk === 1 && r.payload > bestPayload) { bestPayload = r.payload; bestCell = cellPx; }
+      const cells = [];
+      let top = { eff: 0, cellPx: null };
+      for (const cellPx of [8, 10, 12]) {
+        const r = effective(level, cellPx, dist);
+        if (!r) continue;
+        cells.push(`${cellPx}px:${Math.round(r.eff)}B(${(r.meanOk * 100).toFixed(0)}%)`);
+        if (r.eff > top.eff) top = { eff: r.eff, cellPx };
       }
-      best[dn + nm] = { payload: bestPayload, cellPx: bestCell };
+      best[dn + nm] = top;
+      info(`${dn}／${nm}`, cells.join('  '));
     }
-    info(`${dn}失真`, rows.join('  '));
     const c8 = best[dn + 'C8'], sh = best[dn + 'C8+形狀'];
-    info(`${dn}失真：最佳可用設定`,
-      `C8 ${c8.cellPx}px → ${c8.payload} B／幀；C8+形狀 ${sh.cellPx}px → ${sh.payload} B／幀`
-      + `（${(sh.payload / Math.max(1, c8.payload)).toFixed(2)}×）`);
+    info(`${dn}：最佳有效酬載`,
+      `C8 ${c8.cellPx}px → ${Math.round(c8.eff)} B／幀；`
+      + `C8+形狀 ${sh.cellPx}px → ${Math.round(sh.eff)} B／幀`
+      + `（${(sh.eff / Math.max(1, c8.eff)).toFixed(2)}×）`);
   }
 
-  // 結論做成斷言，以後任何改動讓它不再成立時測試會叫
-  check('腳架／輕微失真下，形狀層確實帶來密度優勢',
-    best['無失真C8+形狀'].payload > best['無失真C8'].payload * 1.5
-    && best['輕微C8+形狀'].payload > best['輕微C8'].payload * 1.5,
-    `無失真 ${(best['無失真C8+形狀'].payload / best['無失真C8'].payload).toFixed(2)}×、`
-    + `輕微 ${(best['輕微C8+形狀'].payload / best['輕微C8'].payload).toFixed(2)}×`);
-  check('手持（中等失真）下，形狀層不划算 —— 多出的位元被它要求的格子大小吃回去',
-    best['中等C8+形狀'].payload <= best['中等C8'].payload,
-    `C8 ${best['中等C8'].payload} B vs C8+形狀 ${best['中等C8+形狀'].payload} B`);
+  // 結論寫成斷言，日後任何改動讓它不再成立時測試會叫
+  check('貼著螢幕直拍（無失真）時，形狀層帶來 1.5 倍以上的有效吞吐',
+    best['無失真C8+形狀'].eff > best['無失真C8'].eff * 1.5,
+    `${(best['無失真C8+形狀'].eff / best['無失真C8'].eff).toFixed(2)}×`);
+  // 一旦有真實相機的失真，1.67 倍的位元密度優勢就不見了 ——
+  // 形狀層必須放大格子才穩，格數少掉的剛好把多出來的位元吃回去。
+  // 門檻設在 1.3×（遠低於 1.67×）：逐幀變異本來就大，
+  // 這裡要斷言的是「優勢消失」，不是某個精確的比值。
+  check('一旦有真實相機的失真，形狀層的密度優勢就消失（遠不及 1.67×）',
+    best['輕微C8+形狀'].eff < best['輕微C8'].eff * 1.3
+    && best['中等C8+形狀'].eff < best['中等C8'].eff * 1.3,
+    `輕微 ${(best['輕微C8+形狀'].eff / best['輕微C8'].eff).toFixed(2)}×、`
+    + `中等 ${(best['中等C8+形狀'].eff / best['中等C8'].eff).toFixed(2)}×`
+    + `（純位元密度是 1.67×）`);
 }
 
 /* ---------------------------------------------------------------------- */

@@ -460,7 +460,32 @@ function traceTrackWithBow(img, mapFn, gStart, gEnd, nCells, bow, normal) {
 
   // 時序軌每格換一次色，理論上應有 nCells-1 個交界
   const expect = nCells - 1;
-  const score = contrast - 25 * Math.abs(crossings.length - expect);
+
+  // 交界「間距是否整齊」也要算進分數裡。
+  //
+  // 原本的分數只看「對比 + 交界數接近預期」，那不足以區分
+  // 「真的走在時序軌上」和「走偏到旁邊的資料格」——
+  // 資料格同樣有黑有白（對比一樣是滿的），交界數又剛好可能碰上預期值。
+  // 加了形狀層之後這個漏洞被放大：缺口讓資料格的交界變密，
+  // 走偏的路徑更容易湊到預期的交界數。實測完全無失真的畫面裡，
+  // 八幀就有一幀的幾何殘差爆到 7.1px（正常是 0.2px）、整幀報廢，
+  // 而同一份資料在沒有形狀層時完全正常。
+  //
+  // 真正的時序軌是嚴格一格一換，所以相鄰交界的間距幾乎都等於一格；
+  // 桶狀畸變只會讓間距沿著軌道「緩慢」變化，不會忽大忽小。
+  // 走偏的路徑則是隨機的，間距散得很開。用「間距落在中位數 ±40% 內的比例」
+  // 當規律性指標，既不需要知道真實尺寸，也不會懲罰畸變造成的緩慢變化。
+  let regularity = 1;
+  if (crossings.length >= 8) {
+    const gaps = [];
+    for (let i = 1; i < crossings.length; i++) gaps.push(crossings[i] - crossings[i - 1]);
+    const med = [...gaps].sort((p, q) => p - q)[gaps.length >> 1] || 1;
+    let good = 0;
+    for (const g of gaps) if (g >= med * 0.6 && g <= med * 1.4) good++;
+    regularity = good / gaps.length;
+  }
+
+  const score = contrast - 25 * Math.abs(crossings.length - expect) - 400 * (1 - regularity);
   if (crossings.length < nCells * 0.6 || crossings.length > nCells * 1.5) {
     return { anchorT: null, score, crossings: crossings.length };
   }
