@@ -73,12 +73,64 @@ export const PALETTE_C8 = [
   [255, 255, 255],  // 7 白
 ];
 
-export const PALETTES = { 4: PALETTE_C4, 8: PALETTE_C8 };
+/**
+ * level 32：實驗性的「C8 + 形狀層」。
+ *
+ * 顏色仍是 C8 的八個角（3 bits），另外在每格的四個角落之一畫一個
+ * 「反色缺口」，缺口的位置再帶 2 bits，合計 5 bits/格 ——
+ * 相對 C8 的密度是 1.67 倍。
+ *
+ * 為什麼是「反色缺口」而不是別的圖樣：缺口要能在「還不知道這格是什麼顏色」
+ * 的前提下被找到，所以它必須和格子本身的顏色差得夠遠。
+ * C8 是 RGB 立方體的八個角，任一個角的反色（7−i）正好是對角的那個角，
+ * 也就是整個調色盤裡離它最遠的顏色 —— 缺口與底色的對比天生就是最大的。
+ *
+ * 這個模式是實驗性的：缺口只有格子邊長的四分之一，一旦鏡頭模糊的 σ
+ * 接近缺口大小就整個糊掉。實測資料見 README。
+ */
+export const PALETTES = { 4: PALETTE_C4, 8: PALETTE_C8, 32: PALETTE_C8 };
+
+/** 這個等級用幾個顏色 */
+export function colorCount(level) {
+  return level === 32 ? 8 : level;
+}
+
+/** 這個等級的形狀層有幾種狀態（1 = 沒有形狀層） */
+export function shapeCount(level) {
+  return level === 32 ? 4 : 1;
+}
+
+/** 形狀層帶幾個 bit */
+export function shapeBits(level) {
+  return level === 32 ? 2 : 0;
+}
+
+/** 反色（C8 是 RGB 立方體，反色就是對角的角，也是調色盤裡最遠的顏色） */
+export function complementIndex(level, colorIdx) {
+  return colorCount(level) - 1 - colorIdx;
+}
 
 /** 每格能帶幾個 bit */
 export function bitsPerCell(level) {
+  if (level === 32) return 5;   // 顏色 3 bits + 形狀 2 bits
   return level === 8 ? 3 : 2;
 }
+
+/**
+ * 形狀層的缺口幾何（以格子邊長的比例表示）。
+ * 四個位置分別對應 2 bits 的 0..3。
+ *
+ * 位置與大小是在「缺口要離格子邊緣夠遠（不然相鄰格子會糊進來），
+ * 又要離格子中心夠遠（不然會汙染顏色取樣）」之間取的折衷：
+ * 缺口中心在 0.22／0.78，邊長 0.24 格，佔 0.10～0.34 格；
+ * 顏色則只取中心 ±1/8 格（0.375～0.625），兩者之間留了 0.035 格的間隔。
+ */
+export const SHAPE_SPOTS = [
+  [0.22, 0.22], [0.78, 0.22], [0.22, 0.78], [0.78, 0.78],
+];
+export const SHAPE_SIZE = 0.24;
+/** 有形狀層時，顏色取樣的半徑（格）—— 必須避開缺口 */
+export const SHAPE_COLOR_RADIUS = 0.125;
 
 /* --- sRGB ↔ CIELAB ---------------------------------------------------- */
 
@@ -340,7 +392,7 @@ export function encodeHeader(h) {
   b[4] = (h.frameSeq >>> 16) & 0xff;
   b[5] = (h.frameSeq >>> 8) & 0xff;
   b[6] = h.frameSeq & 0xff;
-  b[7] = h.paletteLevel;              // 4 或 8
+  b[7] = h.paletteLevel;              // 4、8 或 32（C8+形狀層）
   dv.setUint16(8, h.cols, false);
   dv.setUint16(10, h.rows, false);
   b[12] = h.sectorsX;
@@ -359,7 +411,7 @@ export function decodeHeader(b) {
   const dv = new DataView(b.buffer, b.byteOffset, b.byteLength);
   if ((crc32(b, 0, 14) & 0xffff) !== dv.getUint16(14, false)) return null;
   const paletteLevel = b[7];
-  if (paletteLevel !== 4 && paletteLevel !== 8) return null;
+  if (paletteLevel !== 4 && paletteLevel !== 8 && paletteLevel !== 32) return null;
   return {
     sessionId: dv.getUint16(2, false),
     frameSeq: (b[4] << 16) | (b[5] << 8) | b[6],

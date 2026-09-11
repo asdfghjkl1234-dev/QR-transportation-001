@@ -15,7 +15,9 @@ import {
   encodeMetaChunks,
 } from './format.js';
 import { buildFrameGrid, QUIET_CELLS } from './render.js';
-import { PALETTES } from './format.js';
+import {
+  PALETTES, ROLE, shapeCount, complementIndex, SHAPE_SPOTS, SHAPE_SIZE,
+} from './format.js';
 import { LTEncoder2 } from '../v2/fountain2.js';
 import { sha256Hex } from '../fountain.js';
 
@@ -36,8 +38,9 @@ const METADATA_EVERY_FRAMES = 15;
  * 這裡不用 gridToImageData 再貼上去，而是直接寫 ImageData 的位元組，
  * 因為一幀有數萬格、每格數十像素，少一次複製就少一次數 MB 的搬運。
  */
-function gridToBitmap(grid, cols, rows, level, cellPx) {
+function gridToBitmap(grid, cols, rows, level, cellPx, role) {
   const palette = PALETTES[level];
+  const nShape = shapeCount(level);
   const quiet = QUIET_CELLS;
   const W = (cols + quiet * 2) * cellPx;
   const H = (rows + quiet * 2) * cellPx;
@@ -49,14 +52,34 @@ function gridToBitmap(grid, cols, rows, level, cellPx) {
   d.fill(255);   // 白邊
 
   const off = quiet * cellPx;
+  const side = Math.max(1, Math.round(cellPx * SHAPE_SIZE));
   for (let cy = 0; cy < rows; cy++) {
     for (let cx = 0; cx < cols; cx++) {
-      const [r, g, b] = palette[grid[cy * cols + cx]];
+      const i = cy * cols + cx;
+      // 有形狀層時，資料格的值是「顏色 × 形狀數 + 形狀」的複合值；
+      // 控制格存的一律是純顏色索引，兩者靠 role 區分。
+      const isData = nShape > 1 && role[i] === ROLE.DATA;
+      const colorIdx = isData ? Math.floor(grid[i] / nShape) : grid[i];
+      const [r, g, b] = palette[colorIdx];
       const px0 = off + cx * cellPx, py0 = off + cy * cellPx;
       for (let dy = 0; dy < cellPx; dy++) {
         let p = ((py0 + dy) * W + px0) * 4;
         for (let dx = 0; dx < cellPx; dx++) {
           d[p] = r; d[p + 1] = g; d[p + 2] = b;
+          p += 4;
+        }
+      }
+      if (!isData) continue;
+
+      // --- 形狀層：在四個角落之一畫一個反色缺口 ---
+      const [nr, ng, nb] = palette[complementIndex(level, colorIdx)];
+      const spot = SHAPE_SPOTS[grid[i] % nShape];
+      const sx = px0 + Math.round(cellPx * spot[0] - side / 2);
+      const sy = py0 + Math.round(cellPx * spot[1] - side / 2);
+      for (let dy = 0; dy < side; dy++) {
+        let p = ((sy + dy) * W + sx) * 4;
+        for (let dx = 0; dx < side; dx++) {
+          d[p] = nr; d[p + 1] = ng; d[p + 2] = nb;
           p += 4;
         }
       }
@@ -108,7 +131,7 @@ function produceFrame() {
     cols: cfg.cols, rows: cfg.rows, sectorsX: cfg.sectorsX, sectorsY: cfg.sectorsY,
   }, symbols, cfg.level);
 
-  const { bitmap, W, H } = gridToBitmap(grid, cfg.cols, cfg.rows, cfg.level, cfg.cellPx);
+  const { bitmap, W, H } = gridToBitmap(grid, cfg.cols, cfg.rows, cfg.level, cfg.cellPx, layout.role);
   return { bitmap, frameSeq: seq, dataSectors, W, H };
 }
 

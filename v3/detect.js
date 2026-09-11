@@ -22,6 +22,7 @@
 import {
   ROLE, FINDER, HEADER_BYTES, HEADER_COPIES, PALETTES,
   srgbToLab, deltaE, headerMajorityVote, decodeHeader, bitsPerCell,
+  colorCount, shapeCount, SHAPE_SPOTS, SHAPE_SIZE, SHAPE_COLOR_RADIUS,
 } from './format.js';
 import { monoIndices } from './render.js';
 
@@ -1239,23 +1240,229 @@ function cellRadius(sampler, x, y) {
   return Math.max(0.5, Math.min(w, hgt) / 3);
 }
 
+
+/* =========================================================================
+ * 4b. 形狀層（實驗性）
+ * =========================================================================
+ * 每個資料格除了顏色，還在四個角落之一畫了一個「反色缺口」，位置帶 2 bits。
+ *
+ * 這一層對幾何精度的要求高了一個等級。顏色是取格子中心 ±1/3 格的平均，
+ * 就算取樣點偏了 0.2 格也還是落在同一格裡；但缺口只有 0.24 格寬、
+ * 中心離格心 0.28 格，取樣點偏 0.2 格就可能整個錯到隔壁的角落。
+ *
+ * 實測（100×64、中等失真）第一版直接照名目位置取樣的結果很能說明問題：
+ *   10px 格 → 形狀錯誤 2.0%
+ *   12px 格 → 4.0%
+ *   16px 格 → 7.6%
+ * 格子越大反而越糟，而且混淆矩陣清楚顯示是「整批往同一個方向偏」
+ * （16px 時大量的「上排誤判成下排」，且集中在畫面下半）。
+ * 那不是解析度不足，是幾何模型在畫面內部還有殘差 ——
+ * 時序軌只圍住邊界，擬合出來的徑向係數在不同影像尺寸下實測從 0.064 漂到 0.032，
+ * 邊界殘差雖然只有 0.9px，內部卻可以偏掉 0.2～0.3 格。
+ * 顏色層完全看不出來（它容得下），形狀層直接被打爆。
+ *
+ * 對策和標頭那邊一樣：既然偏移在局部是一致的，就把它量出來再扣掉。
+ * 逐分區掃一小組候選偏移，取「缺口與其他三角的對比總和」最大的那一個，
+ * 然後用該偏移判讀整個分區。用對比當目標函式的好處是不需要知道正確答案。
+ */
+function decodeShapeLayer(img, sampler, layout, level, threshold, st) {
+  const { cols } = layout;
+  const nShape = shapeCount(level);
+  const { symbols, lowConf, ratios, colorOf, colorRatio, shapeTodo, topLab, botLab } = st;
+  const y0 = st.barTop, y1 = st.barBottom;
+
+  const refAt = (cy) => {
+    const t = Math.max(0, Math.min(1, (cy - y0) / Math.max(1, y1 - y0)));
+    return topLab.map((lt, i) => [
+      lt[0] * (1 - t) + botLab[i][0] * t,
+      lt[1] * (1 - t) + botLab[i][1] * t,
+      lt[2] * (1 - t) + botLab[i][2] * t,
+    ]);
+  };
+  // 每一列的參考色算一次就好
+  const refCache = new Map();
+  const refRow = (cy) => {
+    let r = refCache.get(cy);
+    if (!r) { r = refAt(cy); refCache.set(cy, r); }
+    return r;
+  };
+
+  /** 讀一格的缺口：回傳最佳角落、最佳與次佳的對比 */
+  const readCell = (i, ox, oy) => {
+    const cx = i % cols, cy = (i / cols) | 0;
+    const base = refRow(cy)[colorOf[i]];
+    const side = cellSide(sampler, cx, cy);
+    const rad = Math.max(0.5, side * SHAPE_SIZE * 0.4);
+    let bestD = -1, bestIdx = 0, secondD = -1;
+    for (let sp = 0; sp < nShape; sp++) {
+      const [fx, fy] = SHAPE_SPOTS[sp];
+      const [qx, qy] = sampler.map(cx + fx + ox, cy + fy + oy);
+      const d = deltaE(srgbToLab(sampleCell(img, qx, qy, rad)), base);
+      if (d > bestD) { secondD = bestD; bestD = d; bestIdx = sp; }
+      else if (d > secondD) secondD = d;
+    }
+    return { bestIdx, bestD, secondD };
+  };
+
+  // --- 估取樣偏移 ---
+  //
+  // 兩段式：先用全幀的抽樣估一個整體偏移，再逐分區在它附近小範圍微調。
+  //
+  // 為什麼不直接逐分區大範圍搜尋：對比這個目標函式偶爾有假的極大值，
+  // 某個分區跑掉就整區報廢（實測輕微失真、12px 格時有一個分區偏到
+  // 讓格子錯誤 0.24% → 2.38%、分區成功率掉到 92%）。
+  // 幾何殘差在整張畫面上是連續變化的，鄰近分區的偏移不會差很多，
+  // 所以用全幀的估計當錨點，可以把每個分區的搜尋範圍收得很窄。
+  const sectorOf = new Int32Array(cols * layout.rows).fill(-1);
+  for (let s = 0; s < layout.sectors.length; s++) {
+    for (const c of layout.sectors[s].cells) sectorOf[c] = s;
+  }
+  const bySector = layout.sectors.map(() => []);
+  for (const i of shapeTodo) {
+    const s = sectorOf[i];
+    if (s >= 0) bySector[s].push(i);
+  }
+
+  /**
+   * 對一組格子評分「這個取樣偏移對不對」。
+   *
+   * 分數用「1 − 次佳/最佳」而不是「最佳 − 次佳」的絕對差，這點很關鍵：
+   * 絕對差會被一個假的極大值騙走 —— 偏移一旦大到把取樣點推出格子邊界，
+   * 取到的就是隔壁格子的顏色，而隔壁通常和本格差很多，
+   * 於是「最佳距離」暴增、分數看起來超好，但判讀全錯。
+   * 改成比值就沒這個問題：每格的貢獻被限制在 0～1 之間，
+   * 靠「缺口比其他三角明顯多少」而不是「絕對差多大」來評分。
+   */
+  const scoreOver = (probe, ox, oy) => {
+    let score = 0;
+    for (const i of probe) {
+      const r = readCell(i, ox, oy);
+      if (r.bestD > 1e-6) score += 1 - r.secondD / r.bestD;
+    }
+    return score;
+  };
+
+  /** 在給定中心附近用逐步縮小的網格找最佳偏移 */
+  const searchOffset = (probe, cx0, cy0, range, steps) => {
+    let bestOx = cx0, bestOy = cy0, bestScore = scoreOver(probe, cx0, cy0);
+    let step = range;
+    for (let pass = 0; pass < steps; pass++) {
+      let moved = false;
+      for (const dx of [-1, 0, 1]) {
+        for (const dy of [-1, 0, 1]) {
+          if (dx === 0 && dy === 0) continue;
+          const ox = bestOx + dx * step, oy = bestOy + dy * step;
+          // 缺口跨 0.10～0.34 格，偏移超過 ±0.12 就會把取樣點壓到格子邊界外
+          if (Math.abs(ox) > 0.12 || Math.abs(oy) > 0.12) continue;
+          const sc = scoreOver(probe, ox, oy);
+          if (sc > bestScore) { bestScore = sc; bestOx = ox; bestOy = oy; moved = true; }
+        }
+      }
+      if (!moved) step /= 2;
+    }
+    return [bestOx, bestOy];
+  };
+
+  // 全幀抽樣（每 31 格取 1，抽樣夠散就夠準）
+  const globalProbe = [];
+  for (let k = 0; k < shapeTodo.length; k += 31) globalProbe.push(shapeTodo[k]);
+  let gx = 0, gy = 0;
+  if (globalProbe.length >= 8) {
+    // 先粗掃一圈 ±0.16 找大致方向，再往下夾
+    let bestScore = -Infinity;
+    for (const ox of [-0.10, -0.05, 0, 0.05, 0.10]) {
+      for (const oy of [-0.10, -0.05, 0, 0.05, 0.10]) {
+        const sc = scoreOver(globalProbe, ox, oy);
+        if (sc > bestScore) { bestScore = sc; gx = ox; gy = oy; }
+      }
+    }
+    [gx, gy] = searchOffset(globalProbe, gx, gy, 0.04, 3);
+  }
+
+  // --- 在一張與分區無關的粗網格上估偏移，再逐格內插 ---
+  //
+  // 幾何殘差在畫面上是連續變化的，而且形狀主要來自徑向畸變的擬合誤差 ——
+  // 那是個以畫面中心為中心的碗形，不是平面。所以：
+  //   1. 把畫面切成 TILES_X × TILES_Y 塊（和分區切法無關），每塊各估一個偏移；
+  //   2. 逐格在四個最近的塊之間做雙線性內插。
+  //
+  // 為什麼不逐分區估：分區只有 4×3，而且「一個分區一個偏移」會在分區邊界
+  // 產生跳變；更糟的是單一分區的對比目標函式偶爾會爬到假的極大值，
+  // 整區就此報廢（實測有一個分區偏到讓該區形狀錯誤 74%，其他區都在 5% 以下）。
+  // 改成粗網格 + 內插之後，每一塊的估計都被鄰居的內插「稀釋」，
+  // 而且塊數變多，單一塊爬錯的影響小得多。
+  const TILES_X = 6, TILES_Y = 4;
+  const tileCells = Array.from({ length: TILES_X * TILES_Y }, () => []);
+  const tileW = cols / TILES_X, tileH = layout.rows / TILES_Y;
+  for (const i of shapeTodo) {
+    const tx = Math.min(TILES_X - 1, Math.floor((i % cols) / tileW));
+    const ty = Math.min(TILES_Y - 1, Math.floor(((i / cols) | 0) / tileH));
+    tileCells[ty * TILES_X + tx].push(i);
+  }
+
+  const tileOx = new Float64Array(TILES_X * TILES_Y).fill(gx);
+  const tileOy = new Float64Array(TILES_X * TILES_Y).fill(gy);
+  for (let t = 0; t < tileCells.length; t++) {
+    const cells = tileCells[t];
+    if (cells.length < 40) continue;
+    const probe = [];
+    for (let k = 0; k < cells.length; k += 9) probe.push(cells[k]);
+    const [ox, oy] = searchOffset(probe, gx, gy, 0.04, 3);
+    tileOx[t] = ox; tileOy[t] = oy;
+  }
+
+  /** 在塊中心之間做雙線性內插，取得某格該用的偏移 */
+  const offsetAt = (cx, cy) => {
+    const fx = Math.max(0, Math.min(TILES_X - 1, cx / tileW - 0.5));
+    const fy = Math.max(0, Math.min(TILES_Y - 1, cy / tileH - 0.5));
+    const x0 = Math.floor(fx), y0 = Math.floor(fy);
+    const x1 = Math.min(TILES_X - 1, x0 + 1), y1 = Math.min(TILES_Y - 1, y0 + 1);
+    const ax = fx - x0, ay = fy - y0;
+    const mix = (arr) =>
+      (arr[y0 * TILES_X + x0] * (1 - ax) + arr[y0 * TILES_X + x1] * ax) * (1 - ay)
+      + (arr[y1 * TILES_X + x0] * (1 - ax) + arr[y1 * TILES_X + x1] * ax) * ay;
+    return [mix(tileOx), mix(tileOy)];
+  };
+
+  for (const i of shapeTodo) {
+    const cx = i % cols, cy = (i / cols) | 0;
+    const [ox, oy] = offsetAt(cx + 0.5, cy + 0.5);
+    const r = readCell(i, ox, oy);
+    symbols[i] = colorOf[i] * nShape + r.bestIdx;
+    // 顏色與形狀兩邊都要有信心才算可信；取較差的那一邊
+    const shapeRatio = r.bestD > 1e-6 ? r.secondD / r.bestD : 1;
+    const worst = Math.max(colorRatio[i], shapeRatio);
+    ratios[i] = worst;
+    if (worst > threshold) lowConf[i] = 1;
+  }
+}
+
+/** 估算某格在影像上的邊長（取寬高的較小者） */
+function cellSide(sampler, x, y) {
+  const [x0, y0] = sampler.map(x, y);
+  const [x1, y1] = sampler.map(x + 1, y);
+  const [x2, y2] = sampler.map(x, y + 1);
+  return Math.min(Math.hypot(x1 - x0, y1 - y0), Math.hypot(x2 - x0, y2 - y0));
+}
+
 /**
  * 取樣所有格子並分類。
  */
 function sampleAllCells(img, sampler, layout, level, threshold) {
   const { cols, rows, role } = layout;
   const palette = PALETTES[level];
+  const nColor = colorCount(level), nShape = shapeCount(level);
   const N = cols * rows;
 
   // --- 先從色票條建立參考色 ---
   // 上下各一條，之後依格子的垂直位置在兩條之間插值，吃掉由上到下的亮度漸層。
-  const refTop = new Array(level).fill(null).map(() => ({ r: 0, g: 0, b: 0, n: 0 }));
-  const refBottom = new Array(level).fill(null).map(() => ({ r: 0, g: 0, b: 0, n: 0 }));
+  const refTop = new Array(nColor).fill(null).map(() => ({ r: 0, g: 0, b: 0, n: 0 }));
+  const refBottom = new Array(nColor).fill(null).map(() => ({ r: 0, g: 0, b: 0, n: 0 }));
 
   const collectBar = (barY, acc) => {
     for (let x = 0; x < cols; x++) {
       if (role[barY * cols + x] !== ROLE.COLORBAR) continue;
-      const idx = x % level;
+      const idx = x % nColor;
       const [px, py] = sampler.map(x + 0.5, barY + 0.5);
       const c = sampleCell(img, px, py, cellRadius(sampler, x, barY));
       acc[idx].r += c[0]; acc[idx].g += c[1]; acc[idx].b += c[2]; acc[idx].n++;
@@ -1276,6 +1483,10 @@ function sampleAllCells(img, sampler, layout, level, threshold) {
   const symbols = new Uint8Array(N);
   const lowConf = new Uint8Array(N);
   const ratios = new Float32Array(N);
+  // 形狀層要跑第二回：先記下每格的顏色與顏色信心度
+  const colorOf = nShape > 1 ? new Uint8Array(N) : null;
+  const colorRatio = nShape > 1 ? new Float32Array(N) : null;
+  const shapeTodo = [];
 
   const y0 = layout.barTop, y1 = layout.barBottom;
   let refLabs = topLab;
@@ -1298,13 +1509,41 @@ function sampleAllCells(img, sampler, layout, level, threshold) {
       const r = role[i];
       // 只有資料格與奇偶標記需要分類，其他結構元素跳過以省時間
       if (r !== ROLE.DATA && r !== ROLE.PARITY) continue;
+      const withShape = nShape > 1 && r === ROLE.DATA;
       const [px, py] = sampler.map(cx + 0.5, cy + 0.5);
-      const rgb = sampleCell(img, px, py, cellRadius(sampler, cx, cy));
-      const { symbol, ratio } = classify(srgbToLab(rgb), refLabs);
-      symbols[i] = symbol;
+      // 有形狀層時，顏色只能取中心一小塊，否則會把缺口一起平均進來
+      const rad = withShape
+        ? Math.max(0.5, cellSide(sampler, cx, cy) * SHAPE_COLOR_RADIUS)
+        : cellRadius(sampler, cx, cy);
+      const rgb = sampleCell(img, px, py, rad);
+      const { symbol: colorIdx, ratio } = classify(srgbToLab(rgb), refLabs);
+
+      if (!withShape) {
+        symbols[i] = colorIdx;
+        ratios[i] = ratio;
+        if (ratio > threshold) lowConf[i] = 1;
+        continue;
+      }
+
+      // 有形狀層時，缺口的判讀留到第二回（需要先估出該分區的取樣偏移）
+      if (withShape) {
+        colorOf[i] = colorIdx;
+        colorRatio[i] = ratio;
+        shapeTodo.push(i);
+        continue;
+      }
+
+      symbols[i] = colorIdx;
       ratios[i] = ratio;
       if (ratio > threshold) lowConf[i] = 1;
     }
+  }
+
+  // --- 第二回：形狀層 ---
+  if (nShape > 1 && shapeTodo.length) {
+    decodeShapeLayer(img, sampler, layout, level, threshold,
+                     { symbols, lowConf, ratios, colorOf, colorRatio, shapeTodo,
+                       topLab, botLab, barTop: layout.barTop, barBottom: layout.barBottom });
   }
 
   // --- 撕裂偵測：四個角的奇偶標記應該一致 ---

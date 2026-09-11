@@ -27,7 +27,8 @@
   #drop:hover,#drop.over{border-color:var(--accent);background:rgba(91,157,255,.07)}
   #drop .big{font-size:15px;margin-bottom:3px}#drop .small{color:var(--muted);font-size:12px}
   #fileInput{display:none}
-  .presets{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+  .presets{display:grid;grid-template-columns:repeat(2,1fr);gap:8px}
+  @media(min-width:560px){.presets{grid-template-columns:repeat(4,1fr)}}
   .preset{padding:10px 6px;border-radius:9px;border:1px solid var(--border);background:var(--panel2);
           color:var(--text);cursor:pointer;text-align:center}
   .preset:hover{border-color:var(--accent)}
@@ -123,6 +124,8 @@
             <div class="nm">標準</div><div class="ds">C8 · 10px · 10fps</div></button>
           <button class="preset" data-preset="extreme">
             <div class="nm">極限</div><div class="ds">C8 · 8px · 12fps</div></button>
+          <button class="preset" data-preset="tripod">
+            <div class="nm">腳架</div><div class="ds">C8+形狀 · 8px · 8fps</div></button>
         </div>
         <div class="hint" style="margin-top:8px">
           不確定用哪一個就先跑「校準模式」，接收端會直接告訴你建議設定
@@ -136,6 +139,7 @@
           <div class="seg" id="palSeg">
             <button data-level="4">C4（2 bit/格）</button>
             <button data-level="8" class="on">C8（3 bit/格）</button>
+            <button data-level="32">C8+形狀（5 bit/格，實驗）</button>
           </div>
         </div>
         <div class="ctl">
@@ -341,9 +345,13 @@ function updateEstimate() {
  * 預設組合
  * ===================================================================== */
 const PRESETS = {
-  stable:   { level: 4, cellPx: 14, fps: 8,  redundancy: 0.25 },
-  standard: { level: 8, cellPx: 10, fps: 10, redundancy: 0.25 },
-  extreme:  { level: 8, cellPx: 8,  fps: 12, redundancy: 0.25 },
+  stable:   { level: 4,  cellPx: 14, fps: 8,  redundancy: 0.25 },
+  standard: { level: 8,  cellPx: 10, fps: 10, redundancy: 0.25 },
+  extreme:  { level: 8,  cellPx: 8,  fps: 12, redundancy: 0.25 },
+  // 形狀層每格多帶 2 bits，但對幾何精度的要求高一個等級：
+  // 實測手持（中等失真）時 8px 格會整幀垮掉，腳架或貼著螢幕拍才穩。
+  // 幀率也刻意壓低，因為解碼一幀要兩三倍的時間。
+  tripod:   { level: 32, cellPx: 8,  fps: 8,  redundancy: 0.25 },
 };
 
 function applyPreset(name) {

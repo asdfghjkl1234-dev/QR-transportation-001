@@ -14,6 +14,7 @@
 import {
   ROLE, FINDER, HEADER_BYTES, HEADER_COPIES, PALETTES,
   finderPattern, encodeHeader,
+  colorCount, shapeCount, complementIndex, SHAPE_SPOTS, SHAPE_SIZE,
 } from './format.js';
 
 /**
@@ -22,7 +23,7 @@ import {
  * 它們必須在還沒建立顏色參考之前就能被辨識出來。
  */
 export function monoIndices(level) {
-  return level === 8 ? { black: 0, white: 7 } : { black: 0, white: 1 };
+  return colorCount(level) === 8 ? { black: 0, white: 7 } : { black: 0, white: 1 };
 }
 
 /**
@@ -74,7 +75,7 @@ export function buildFrameGrid(layout, header, sectorSymbols, level) {
   for (let y = 0; y < rows; y++) {
     for (let x = 0; x < cols; x++) {
       if (role[at(x, y)] !== ROLE.COLORBAR) continue;
-      grid[at(x, y)] = x % level;
+      grid[at(x, y)] = x % colorCount(level);
     }
   }
 
@@ -107,7 +108,10 @@ export function buildFrameGrid(layout, header, sectorSymbols, level) {
     const syms = sectorSymbols[s];
     if (!syms) continue;
     for (let i = 0; i < sector.cells.length; i++) {
-      grid[sector.cells[i]] = syms[i] % level;
+      // 有形狀層時，符號值是「顏色 × 形狀數 + 形狀」的複合值；
+      // 控制格（定位標記、時序軌、標頭…）存的一律是純顏色索引，
+      // 兩者靠 role 區分（畫圖時只有 ROLE.DATA 會畫缺口）。
+      grid[sector.cells[i]] = syms[i] % (colorCount(level) * shapeCount(level));
     }
   }
 
@@ -135,8 +139,9 @@ export const QUIET_CELLS = 3;
  * @param {number} [quiet=QUIET_CELLS] 白邊寬度（格）
  * @returns {ImageData}
  */
-export function gridToImageData(grid, cols, rows, level, cellPx, quiet = QUIET_CELLS) {
+export function gridToImageData(grid, cols, rows, level, cellPx, quiet = QUIET_CELLS, role = null) {
   const palette = PALETTES[level];
+  const nShape = shapeCount(level);
   const W = (cols + quiet * 2) * cellPx;
   const H = (rows + quiet * 2) * cellPx;
   const img = new ImageData(W, H);
@@ -146,12 +151,30 @@ export function gridToImageData(grid, cols, rows, level, cellPx, quiet = QUIET_C
   const off = quiet * cellPx;
   for (let cy = 0; cy < rows; cy++) {
     for (let cx = 0; cx < cols; cx++) {
-      const [r, g, b] = palette[grid[cy * cols + cx]];
+      const i = cy * cols + cx;
+      const isData = nShape > 1 && role && role[i] === ROLE.DATA;
+      const colorIdx = isData ? Math.floor(grid[i] / nShape) : grid[i];
+      const [r, g, b] = palette[colorIdx];
       const px0 = off + cx * cellPx, py0 = off + cy * cellPx;
       for (let dy = 0; dy < cellPx; dy++) {
         let p = ((py0 + dy) * W + px0) * 4;
         for (let dx = 0; dx < cellPx; dx++) {
           d[p] = r; d[p + 1] = g; d[p + 2] = b; d[p + 3] = 255;
+          p += 4;
+        }
+      }
+      if (!isData) continue;
+
+      // --- 形狀層：在四個角落之一畫一個反色缺口 ---
+      const [nr, ng, nb] = palette[complementIndex(level, colorIdx)];
+      const spot = SHAPE_SPOTS[grid[i] % nShape];
+      const side = Math.max(1, Math.round(cellPx * SHAPE_SIZE));
+      const sx = px0 + Math.round(cellPx * spot[0] - side / 2);
+      const sy = py0 + Math.round(cellPx * spot[1] - side / 2);
+      for (let dy = 0; dy < side; dy++) {
+        let p = ((sy + dy) * W + sx) * 4;
+        for (let dx = 0; dx < side; dx++) {
+          d[p] = nr; d[p + 1] = ng; d[p + 2] = nb; d[p + 3] = 255;
           p += 4;
         }
       }
@@ -164,23 +187,46 @@ export function gridToImageData(grid, cols, rows, level, cellPx, quiet = QUIET_C
  * 直接畫到 canvas（發送端用）。
  * @param {CanvasRenderingContext2D|OffscreenCanvasRenderingContext2D} ctx
  */
-export function drawGrid(ctx, grid, cols, rows, level, cellPx, quiet = QUIET_CELLS) {
+export function drawGrid(ctx, grid, cols, rows, level, cellPx, quiet = QUIET_CELLS, role = null) {
   const palette = PALETTES[level];
+  const nColor = colorCount(level), nShape = shapeCount(level);
   ctx.imageSmoothingEnabled = false;   // 任何插值都會在格子交界產生假的中間色
 
   // 白邊
   ctx.fillStyle = '#ffffff';
   ctx.fillRect(0, 0, (cols + quiet * 2) * cellPx, (rows + quiet * 2) * cellPx);
 
-  // 同色的格子一起畫，可以少掉大量的 fillStyle 切換
   const off = quiet * cellPx;
-  for (let idx = 0; idx < level; idx++) {
+  const isData = (i) => nShape > 1 && role && role[i] === ROLE.DATA;
+  const colorOf = (i) => (isData(i) ? Math.floor(grid[i] / nShape) : grid[i]);
+
+  // 同色的格子一起畫，可以少掉大量的 fillStyle 切換
+  for (let idx = 0; idx < nColor; idx++) {
     const [r, g, b] = palette[idx];
     ctx.fillStyle = `rgb(${r},${g},${b})`;
     for (let cy = 0; cy < rows; cy++) {
       for (let cx = 0; cx < cols; cx++) {
-        if (grid[cy * cols + cx] !== idx) continue;
+        const i = cy * cols + cx;
+        if (colorOf(i) !== idx) continue;
         ctx.fillRect(off + cx * cellPx, off + cy * cellPx, cellPx, cellPx);
+      }
+    }
+  }
+
+  // --- 形狀層：缺口按反色分組畫 ---
+  if (nShape > 1 && role) {
+    const side = Math.max(1, Math.round(cellPx * SHAPE_SIZE));
+    for (let idx = 0; idx < nColor; idx++) {
+      const [r, g, b] = palette[complementIndex(level, idx)];
+      ctx.fillStyle = `rgb(${r},${g},${b})`;
+      for (let cy = 0; cy < rows; cy++) {
+        for (let cx = 0; cx < cols; cx++) {
+          const i = cy * cols + cx;
+          if (!isData(i) || colorOf(i) !== idx) continue;
+          const spot = SHAPE_SPOTS[grid[i] % nShape];
+          ctx.fillRect(off + cx * cellPx + Math.round(cellPx * spot[0] - side / 2),
+                       off + cy * cellPx + Math.round(cellPx * spot[1] - side / 2), side, side);
+        }
       }
     }
   }

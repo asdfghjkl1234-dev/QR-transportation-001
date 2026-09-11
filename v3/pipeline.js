@@ -41,7 +41,9 @@ export function encodeFrame(cfg, header, payloads) {
   });
 
   const grid = buildFrameGrid(layout, full, symbols, cfg.level);
-  const img = gridToImageData(grid, cfg.cols, cfg.rows, cfg.level, cfg.cellPx);
+  // role 要傳進去：有形狀層時，只有資料格才畫缺口
+  const img = gridToImageData(grid, cfg.cols, cfg.rows, cfg.level, cfg.cellPx,
+                              undefined, layout.role);
   return { img, grid, layout, capacity };
 }
 

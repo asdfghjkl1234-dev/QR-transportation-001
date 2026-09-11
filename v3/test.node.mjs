@@ -497,5 +497,100 @@ section('12. 端到端傳檔（第 2 階段驗收）：整份檔案走完編碼�
 }
 
 /* ---------------------------------------------------------------------- */
+section('13. 形狀層（第 4 階段，實驗性）');
+{
+  // 每格除了 C8 的顏色（3 bits），再用「四個角落之一的反色缺口」帶 2 bits，
+  // 合計 5 bits/格 —— 位元密度是 C8 的 1.67 倍。
+  // 但缺口只有 0.24 格寬、中心離格心 0.28 格，對幾何精度的要求高一個等級，
+  // 所以這裡量的是「多出來的位元，值不值得它要求的格子大小」。
+  const LIGHT = {
+    ...MEDIUM_DISTORTION, rotate: 3, tiltX: 0.02, tiltY: 0.015, barrel: 0.02,
+    blur: 0.4, gradient: 0.1, glare: 0.1, noise: 3,
+    saturation: 0.92, gamma: 1.05, wb: [1.02, 1, 0.97], jpegQuality: 0.9,
+  };
+
+  // 固定 1920×1080 的螢幕：格子越大，網格越小，一幀能送的位元組也越少。
+  // 這才是「一幀送多少位元組」的公平比較。
+  const QUIET = 3;
+  const at1080 = (level, cellPx, dist) => {
+    const cols = Math.floor(1920 / cellPx) - QUIET * 2;
+    const rows = Math.floor(1080 / cellPx) - QUIET * 2;
+    const layout = F.makeLayout(cols, rows, 4, 3);
+    const cap = F.frameCapacity(layout, level, 0.25);
+    if (!cap || cap.payloadPerSector < 25) return null;
+    const payloads = layout.sectors.map((s, i) => {
+      const p = new Uint8Array(cap.payloadPerSector);
+      for (let j = 0; j < p.length; j++) p[j] = (j * 31 + i * 101) & 255;
+      return p;
+    });
+    const { img, grid } = encodeFrame(
+      { cols, rows, level, cellPx, sectorsX: 4, sectorsY: 3, redundancy: 0.25 },
+      { sessionId: 0x1234, frameSeq: 7}, payloads);
+    const res = decodeFrame(distort(img, dist), 0.25,
+      { hint: { cols, rows, sectorsX: 4, sectorsY: 3 } });
+    if (!res.ok) return { cols, rows, payload: cap.totalPayload, ok: false, reason: res.reason };
+    let wrong = 0, total = 0;
+    for (const s of res.layout.sectors) for (const c of s.cells) {
+      total++; if (res.detection.symbols[c] !== grid[c]) wrong++;
+    }
+    let okSectors = 0;
+    for (let i = 0; i < res.sectors.length; i++) {
+      const p = res.sectors[i];
+      if (p && p.subarray(0, payloads[i].length).every((v, k) => v === payloads[i][k])) okSectors++;
+    }
+    return {
+      ok: true, cols, rows, payload: cap.totalPayload,
+      cellErr: wrong / total, sectorOk: okSectors / res.stats.sectorTotal,
+    };
+  };
+
+  check('形狀層的位元密度是 C8 的 1.67 倍',
+    F.bitsPerCell(32) === 5 && F.bitsPerCell(8) === 3,
+    `每格 ${F.bitsPerCell(32)} bits vs ${F.bitsPerCell(8)} bits`);
+  check('形狀層的缺口用反色（C8 的反色就是調色盤裡最遠的顏色）',
+    F.complementIndex(32, 0) === 7 && F.complementIndex(32, 7) === 0
+    && F.complementIndex(32, 2) === 5);
+
+  // --- 無失真：形狀層能不能正確來回 ---
+  {
+    const r = at1080(32, 8, NO_DISTORTION);
+    check('無失真：C8+形狀 @8px 完全正確', r && r.ok && r.cellErr === 0 && r.sectorOk === 1,
+      r && r.ok ? `每幀 ${r.payload} B（${r.cols}×${r.rows}）` : '解不開');
+  }
+
+  // --- 三種失真強度下的「每幀有效位元組」比較 ---
+  info('比較基準', '1920×1080 螢幕、4×3 分區、RS 冗餘 0.25；只計分區全數正確的設定');
+  const best = {};
+  for (const [dn, dist] of [['無失真', NO_DISTORTION], ['輕微', LIGHT], ['中等', MEDIUM_DISTORTION]]) {
+    const rows = [];
+    for (const [level, nm] of [[8, 'C8'], [32, 'C8+形狀']]) {
+      let bestPayload = 0, bestCell = null;
+      for (const cellPx of [8, 10, 12, 14]) {
+        const r = at1080(level, cellPx, dist);
+        if (!r || !r.ok) continue;
+        rows.push(`${nm}@${cellPx}:${(r.cellErr * 100).toFixed(1)}%/${(r.sectorOk * 100).toFixed(0)}%`);
+        if (r.sectorOk === 1 && r.payload > bestPayload) { bestPayload = r.payload; bestCell = cellPx; }
+      }
+      best[dn + nm] = { payload: bestPayload, cellPx: bestCell };
+    }
+    info(`${dn}失真`, rows.join('  '));
+    const c8 = best[dn + 'C8'], sh = best[dn + 'C8+形狀'];
+    info(`${dn}失真：最佳可用設定`,
+      `C8 ${c8.cellPx}px → ${c8.payload} B／幀；C8+形狀 ${sh.cellPx}px → ${sh.payload} B／幀`
+      + `（${(sh.payload / Math.max(1, c8.payload)).toFixed(2)}×）`);
+  }
+
+  // 結論做成斷言，以後任何改動讓它不再成立時測試會叫
+  check('腳架／輕微失真下，形狀層確實帶來密度優勢',
+    best['無失真C8+形狀'].payload > best['無失真C8'].payload * 1.5
+    && best['輕微C8+形狀'].payload > best['輕微C8'].payload * 1.5,
+    `無失真 ${(best['無失真C8+形狀'].payload / best['無失真C8'].payload).toFixed(2)}×、`
+    + `輕微 ${(best['輕微C8+形狀'].payload / best['輕微C8'].payload).toFixed(2)}×`);
+  check('手持（中等失真）下，形狀層不划算 —— 多出的位元被它要求的格子大小吃回去',
+    best['中等C8+形狀'].payload <= best['中等C8'].payload,
+    `C8 ${best['中等C8'].payload} B vs C8+形狀 ${best['中等C8+形狀'].payload} B`);
+}
+
+/* ---------------------------------------------------------------------- */
 console.log(`\n\x1b[1m結果：${passed} 項通過，${failed} 項失敗\x1b[0m\n`);
 process.exit(failed === 0 ? 0 : 1);
