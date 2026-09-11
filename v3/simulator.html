@@ -1,0 +1,473 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>v3 合成通道模擬器</title>
+<style>
+  :root{--bg:#0b0e13;--panel:#141922;--panel2:#0e1219;--border:#232b38;--text:#e8ecf3;
+        --muted:#93a0b4;--accent:#5b9dff;--ok:#3ddc97;--warn:#ffbe4d;--danger:#ff6b6b}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);
+       font:13.5px/1.6 system-ui,-apple-system,"Noto Sans TC","Microsoft JhengHei",sans-serif}
+  .wrap{max-width:1400px;margin:0 auto;padding:20px 16px 60px}
+  h1{font-size:19px;margin:0 0 2px}
+  .sub{color:var(--muted);font-size:13px;margin:0 0 18px}
+  .sub a{color:var(--accent)}
+  .layout{display:grid;grid-template-columns:320px 1fr;gap:18px;align-items:start}
+  @media(max-width:1000px){.layout{grid-template-columns:1fr}}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:11px;padding:14px}
+  .card+.card{margin-top:12px}
+  .card h2{font-size:11.5px;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);
+           margin:0 0 10px;font-weight:600}
+  .ctl{margin-bottom:11px}
+  .ctl label{display:flex;justify-content:space-between;align-items:baseline;font-size:12.5px;margin-bottom:3px}
+  .ctl .val{color:var(--accent);font-variant-numeric:tabular-nums;font-weight:600}
+  input[type=range]{width:100%;accent-color:var(--accent);margin:0}
+  .seg{display:flex;gap:5px}
+  .seg button{flex:1;padding:6px 4px;border-radius:7px;border:1px solid var(--border);
+              background:transparent;color:var(--muted);cursor:pointer;font-size:12px}
+  .seg button.on{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+  button.btn{padding:9px 15px;border-radius:8px;border:1px solid var(--border);background:var(--panel2);
+             color:var(--text);cursor:pointer;font-size:13.5px}
+  button.btn:hover:not(:disabled){border-color:var(--accent)}
+  button.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+  button.btn:disabled{opacity:.45;cursor:not-allowed}
+  .buttons{display:flex;gap:8px;flex-wrap:wrap}
+  .views{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+  @media(max-width:760px){.views{grid-template-columns:1fr}}
+  .view{background:var(--panel2);border-radius:9px;padding:8px}
+  .view h3{font-size:11.5px;color:var(--muted);margin:0 0 6px;font-weight:600}
+  .view canvas{width:100%;height:auto;display:block;border-radius:6px;image-rendering:pixelated}
+  .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:8px;margin-top:12px}
+  .stat{background:var(--panel2);border-radius:8px;padding:7px 10px}
+  .stat .lbl{color:var(--muted);font-size:10.5px}
+  .stat .num{font-size:16px;font-weight:600;font-variant-numeric:tabular-nums}
+  .stat.good .num{color:var(--ok)} .stat.bad .num{color:var(--danger)} .stat.warn .num{color:var(--warn)}
+  .note{border-radius:8px;padding:9px 11px;font-size:12px;margin-top:10px}
+  .note.ok{background:rgba(61,220,151,.1);border:1px solid rgba(61,220,151,.35);color:var(--ok)}
+  .note.err{background:rgba(255,107,107,.1);border:1px solid rgba(255,107,107,.35);color:var(--danger)}
+  .note.info{background:rgba(91,157,255,.1);border:1px solid rgba(91,157,255,.3);color:var(--accent)}
+  #chart{width:100%;height:260px;display:block;background:var(--panel2);border-radius:8px}
+  .legend{display:flex;gap:14px;font-size:11.5px;color:var(--muted);margin-top:6px;flex-wrap:wrap}
+  .legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:4px;vertical-align:-1px}
+  .hidden{display:none!important}
+  table{width:100%;border-collapse:collapse;font-size:12px;font-variant-numeric:tabular-nums}
+  th,td{text-align:right;padding:3px 6px;border-bottom:1px solid var(--border)}
+  th:first-child,td:first-child{text-align:left}
+  th{color:var(--muted);font-weight:600}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>v3 合成通道模擬器</h1>
+  <p class="sub">
+    不經過相機，直接把發送端產生的幀加上各種失真再交給接收端解碼，量出格子錯誤率與分區成功率。
+    每一項失真都可以單獨調整，也可以掃描強度畫出曲線。
+    <br>驗收標準：中等失真下 C4 格子錯誤 &lt; 1%、C8 &lt; 3%，分區成功率 &gt; 95%。
+  </p>
+
+  <div class="layout">
+    <!-- ============ 左：控制 ============ -->
+    <div>
+      <div class="card">
+        <h2>編碼設定</h2>
+        <div class="ctl">
+          <label>調色盤</label>
+          <div class="seg" id="palSeg">
+            <button data-level="4" class="on">C4（2 bit/格）</button>
+            <button data-level="8">C8（3 bit/格）</button>
+            <button data-level="32">C8+形狀（5 bit/格，實驗）</button>
+          </div>
+        </div>
+        <div class="ctl">
+          <label>網格 <span class="val" id="gridVal">100×64</span></label>
+          <input type="range" id="gridR" min="60" max="160" step="4" value="100">
+        </div>
+        <div class="ctl">
+          <label>每格像素 <span class="val" id="cellVal">8</span></label>
+          <input type="range" id="cellR" min="4" max="16" step="1" value="8">
+        </div>
+        <div class="ctl">
+          <label>RS 冗餘 <span class="val" id="redVal">0.25</span></label>
+          <input type="range" id="redR" min="0.1" max="0.4" step="0.05" value="0.25">
+        </div>
+        <div class="ctl">
+          <label>信心度門檻 <span class="val" id="thrVal">0.82</span></label>
+          <input type="range" id="thrR" min="0.5" max="0.98" step="0.02" value="0.82">
+          <div style="color:var(--muted);font-size:11px;margin-top:2px">
+            超過此值標為抹除。標太多會浪費 RS 能力，不是越多越好
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>通道失真</h2>
+        <div class="ctl"><label>留白比例 <span class="val" id="marginVal">0.10</span></label>
+          <input type="range" id="marginR" min="0" max="0.3" step="0.01" value="0.10"></div>
+        <div class="ctl"><label>旋轉（度） <span class="val" id="rotVal">8</span></label>
+          <input type="range" id="rotR" min="-30" max="30" step="1" value="8"></div>
+        <div class="ctl"><label>透視傾斜 X <span class="val" id="tiltXVal">0.06</span></label>
+          <input type="range" id="tiltXR" min="-0.2" max="0.2" step="0.01" value="0.06"></div>
+        <div class="ctl"><label>透視傾斜 Y <span class="val" id="tiltYVal">0.04</span></label>
+          <input type="range" id="tiltYR" min="-0.2" max="0.2" step="0.01" value="0.04"></div>
+        <div class="ctl"><label>桶狀畸變 <span class="val" id="barrelVal">0.06</span></label>
+          <input type="range" id="barrelR" min="-0.1" max="0.3" step="0.01" value="0.06"></div>
+        <div class="ctl"><label>高斯模糊 σ <span class="val" id="blurVal">0.8</span></label>
+          <input type="range" id="blurR" min="0" max="4" step="0.1" value="0.8"></div>
+        <div class="ctl"><label>亮度漸層 <span class="val" id="gradVal">0.22</span></label>
+          <input type="range" id="gradR" min="0" max="0.7" step="0.02" value="0.22"></div>
+        <div class="ctl"><label>反光強度 <span class="val" id="glareVal">0.25</span></label>
+          <input type="range" id="glareR" min="0" max="1" step="0.05" value="0.25"></div>
+        <div class="ctl"><label>白平衡 R <span class="val" id="wbRVal">1.06</span></label>
+          <input type="range" id="wbRR" min="0.7" max="1.4" step="0.02" value="1.06"></div>
+        <div class="ctl"><label>白平衡 B <span class="val" id="wbBVal">0.92</span></label>
+          <input type="range" id="wbBR" min="0.7" max="1.4" step="0.02" value="0.92"></div>
+        <div class="ctl"><label>gamma <span class="val" id="gammaVal">1.15</span></label>
+          <input type="range" id="gammaR" min="0.6" max="2" step="0.05" value="1.15"></div>
+        <div class="ctl"><label>飽和度 <span class="val" id="satVal">0.82</span></label>
+          <input type="range" id="satR" min="0.3" max="1" step="0.02" value="0.82"></div>
+        <div class="ctl"><label>感光雜訊 <span class="val" id="noiseVal">6</span></label>
+          <input type="range" id="noiseR" min="0" max="60" step="1" value="6"></div>
+        <div class="ctl"><label>JPEG 品質 <span class="val" id="jpegVal">0.75</span></label>
+          <input type="range" id="jpegR" min="0.3" max="1" step="0.05" value="0.75"></div>
+        <div class="ctl"><label>撕裂混合比例 <span class="val" id="tearVal">0</span></label>
+          <input type="range" id="tearR" min="0" max="0.6" step="0.05" value="0">
+          <div style="color:var(--muted);font-size:11px;margin-top:2px">上方這個比例的畫面取自另一幀</div>
+        </div>
+        <div class="buttons" style="margin-top:10px">
+          <button class="btn" id="btnMedium">中等失真</button>
+          <button class="btn" id="btnNone">完全無失真</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============ 右：結果 ============ -->
+    <div>
+      <div class="card">
+        <div class="buttons">
+          <button class="btn primary" id="btnRun">重新模擬</button>
+          <button class="btn" id="btnSweep">掃描失真強度</button>
+          <span id="busy" class="hidden" style="color:var(--muted);align-self:center">計算中…</span>
+        </div>
+        <div class="stats" id="stats"></div>
+        <div id="verdict"></div>
+      </div>
+
+      <div class="card">
+        <div class="views">
+          <div class="view"><h3>發送端輸出（原始幀）</h3><canvas id="cvSrc"></canvas></div>
+          <div class="view"><h3>接收端看到的（失真後）</h3><canvas id="cvDst"></canvas></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>失真強度掃描</h2>
+        <div class="ctl" style="max-width:300px">
+          <label>掃描項目</label>
+          <select id="sweepKey" style="width:100%;padding:7px;border-radius:7px;background:var(--panel2);
+                  color:var(--text);border:1px solid var(--border)">
+            <option value="blur">高斯模糊 σ</option>
+            <option value="noise">感光雜訊</option>
+            <option value="barrel">桶狀畸變</option>
+            <option value="rotate">旋轉角度</option>
+            <option value="glare">反光強度</option>
+            <option value="saturation">飽和度</option>
+            <option value="jpegQuality">JPEG 品質</option>
+          </select>
+        </div>
+        <canvas id="chart"></canvas>
+        <div class="legend">
+          <span><i style="background:#ff6b6b"></i>格子錯誤率</span>
+          <span><i style="background:#3ddc97"></i>分區成功率</span>
+          <span><i style="background:#5b9dff"></i>有效吞吐（相對）</span>
+        </div>
+        <div id="sweepTable" style="margin-top:10px"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script type="module">
+import { makeLayout, frameCapacity } from './format.js';
+import { encodeFrame, decodeFrame } from './pipeline.js';
+import { distort, applyJpeg, MEDIUM_DISTORTION, NO_DISTORTION } from './simulator.js';
+
+const $ = (id) => document.getElementById(id);
+
+/* 目前設定 */
+const S = { level: 4, cols: 100, rows: 64, cellPx: 8, redundancy: 0.25, threshold: 0.82 };
+
+/** 從滑桿讀出整組失真參數 */
+function readDistortion() {
+  return {
+    margin: +$('marginR').value,
+    rotate: +$('rotR').value,
+    tiltX: +$('tiltXR').value,
+    tiltY: +$('tiltYR').value,
+    barrel: +$('barrelR').value,
+    blur: +$('blurR').value,
+    gradient: +$('gradR').value,
+    glare: +$('glareR').value,
+    glareSize: 0.18,
+    wb: [+$('wbRR').value, 1, +$('wbBR').value],
+    gamma: +$('gammaR').value,
+    saturation: +$('satR').value,
+    noise: +$('noiseR').value,
+    jpegQuality: +$('jpegR').value,
+    seed: 12345,
+  };
+}
+
+/** 產生一幀（含已知的酬載，用來比對還原是否正確） */
+function buildFrame(frameSeq = 7) {
+  const cfg = {
+    cols: S.cols, rows: S.rows, level: S.level, cellPx: S.cellPx,
+    sectorsX: 4, sectorsY: 3, redundancy: S.redundancy,
+  };
+  const layout = makeLayout(S.cols, S.rows, 4, 3);
+  const cap = frameCapacity(layout, S.level, S.redundancy);
+  const payloads = layout.sectors.map((s, i) => {
+    const p = new Uint8Array(cap.payloadPerSector);
+    for (let j = 0; j < p.length; j++) p[j] = (j * 31 + i * 101 + frameSeq) & 255;
+    return p;
+  });
+  const { img, grid } = encodeFrame(cfg, { sessionId: 0x1234, frameSeq }, payloads);
+  return { img, grid, payloads, cap, cfg };
+}
+
+/** 跑一次完整模擬 */
+async function simulate(dist, frame) {
+  const f = frame || buildFrame();
+  const tear = +$('tearR').value;
+  const other = tear > 0 ? buildFrame(8).img : null;
+
+  let noisy = distort(f.img, dist, other, tear);
+  noisy = await applyJpeg(noisy, dist.jpegQuality);
+
+  const t0 = performance.now();
+  const res = decodeFrame(noisy, S.redundancy, {
+    confidenceThreshold: S.threshold,
+    hint: { cols: S.cols, rows: S.rows, sectorsX: 4, sectorsY: 3 },
+  });
+  const ms = performance.now() - t0;
+
+  if (!res.ok) return { noisy, ok: false, reason: res.reason, ms, cap: f.cap };
+
+  let wrong = 0, total = 0;
+  for (const s of res.layout.sectors) {
+    for (const c of s.cells) { total++; if (res.detection.symbols[c] !== f.grid[c]) wrong++; }
+  }
+  let payloadOk = 0;
+  for (let i = 0; i < res.sectors.length; i++) {
+    const p = res.sectors[i];
+    if (p && p.subarray(0, f.payloads[i].length).every((v, k) => v === f.payloads[i][k])) payloadOk++;
+  }
+  return {
+    noisy, ok: true, ms, cap: f.cap,
+    cellErr: wrong / total,
+    sectorOk: payloadOk / res.stats.sectorTotal,
+    erasureRate: res.stats.erasureRate,
+    corrected: res.stats.corrected,
+    torn: res.torn,
+    rms: res.detection.sampler.rms ?? 0,
+    k: res.detection.sampler.k ?? 0,
+    goodBytes: payloadOk * f.cap.payloadPerSector,
+  };
+}
+
+/** 把 ImageData 畫到 canvas（等比縮到不超過 520px 寬） */
+function show(canvasId, img) {
+  const cv = $(canvasId);
+  cv.width = img.width; cv.height = img.height;
+  cv.getContext('2d').putImageData(img, 0, 0);
+}
+
+function statCard(lbl, num, cls = '') {
+  return `<div class="stat ${cls}"><div class="lbl">${lbl}</div><div class="num">${num}</div></div>`;
+}
+
+async function run() {
+  $('busy').classList.remove('hidden');
+  $('btnRun').disabled = true;
+  await new Promise((r) => setTimeout(r, 10));   // 讓「計算中」有機會畫出來
+
+  const f = buildFrame();
+  show('cvSrc', f.img);
+  const dist = readDistortion();
+  const r = await simulate(dist, f);
+  show('cvDst', r.noisy);
+
+  if (!r.ok) {
+    $('stats').innerHTML = statCard('解碼', '失敗', 'bad')
+      + statCard('耗時', `${r.ms.toFixed(0)} ms`)
+      + statCard('每幀容量', `${r.cap.totalPayload} B`);
+    $('verdict').innerHTML = `<div class="note err">✗ 這一幀解不開：${r.reason}</div>`;
+  } else {
+    const cellPct = r.cellErr * 100;
+    // 驗收門檻：C4 < 1%、C8 < 3%；形狀層是實驗性的，沿用 C8 的門檻
+    const limit = S.level === 4 ? 1 : 3;
+    $('stats').innerHTML =
+      statCard('格子錯誤率', `${cellPct.toFixed(2)}%`, cellPct < limit ? 'good' : 'bad')
+      + statCard('分區成功率', `${(r.sectorOk * 100).toFixed(0)}%`, r.sectorOk > 0.95 ? 'good' : 'bad')
+      + statCard('抹除比例', `${(r.erasureRate * 100).toFixed(1)}%`)
+      + statCard('RS 修正', r.corrected)
+      + statCard('幾何殘差', `${r.rms.toFixed(2)} px`, r.rms < S.cellPx / 3 ? 'good' : 'warn')
+      + statCard('擬合畸變 k', r.k.toFixed(3))
+      + statCard('有效酬載', `${r.goodBytes} B`)
+      + statCard('解碼耗時', `${r.ms.toFixed(0)} ms`);
+
+    const pass = cellPct < limit && r.sectorOk > 0.95;
+    $('verdict').innerHTML = `<div class="note ${pass ? 'ok' : 'err'}">`
+      + `${pass ? '✓ 通過' : '✗ 未達'}驗收標準（${S.level === 32 ? 'C8+形狀' : 'C' + S.level} 格子錯誤 &lt; ${limit}%、分區成功 &gt; 95%）`
+      + (r.torn ? '　·　偵測到畫面撕裂' : '')
+      + `</div>`;
+  }
+
+  $('busy').classList.add('hidden');
+  $('btnRun').disabled = false;
+}
+
+/* ---------------- 失真強度掃描 ---------------- */
+const SWEEP_RANGES = {
+  blur: [0, 0.5, 1, 1.5, 2, 2.5, 3],
+  noise: [0, 5, 10, 20, 30, 45, 60],
+  barrel: [0, 0.03, 0.06, 0.1, 0.15, 0.2, 0.25],
+  rotate: [0, 5, 10, 15, 20, 25, 30],
+  glare: [0, 0.15, 0.3, 0.45, 0.6, 0.8, 1],
+  saturation: [1, 0.9, 0.8, 0.7, 0.6, 0.5, 0.4],
+  jpegQuality: [1, 0.9, 0.8, 0.7, 0.6, 0.5, 0.4],
+};
+
+async function sweep() {
+  const key = $('sweepKey').value;
+  const values = SWEEP_RANGES[key];
+  $('busy').classList.remove('hidden');
+  $('btnSweep').disabled = true;
+
+  const base = readDistortion();
+  const f = buildFrame();
+  const rows = [];
+  for (const v of values) {
+    await new Promise((r) => setTimeout(r, 0));
+    const r = await simulate({ ...base, [key]: v }, f);
+    rows.push({
+      v,
+      cellErr: r.ok ? r.cellErr : 1,
+      sectorOk: r.ok ? r.sectorOk : 0,
+      bytes: r.ok ? r.goodBytes : 0,
+    });
+  }
+  drawChart(key, rows, f.cap.totalPayload);
+  $('busy').classList.add('hidden');
+  $('btnSweep').disabled = false;
+}
+
+function drawChart(key, rows, maxBytes) {
+  const cv = $('chart');
+  const dpr = window.devicePixelRatio || 1;
+  const W = cv.clientWidth, H = 260;
+  cv.width = W * dpr; cv.height = H * dpr;
+  const ctx = cv.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+
+  const pad = { l: 44, r: 14, t: 14, b: 30 };
+  const pw = W - pad.l - pad.r, ph = H - pad.t - pad.b;
+
+  // 格線與 Y 軸
+  ctx.strokeStyle = '#232b38'; ctx.fillStyle = '#93a0b4';
+  ctx.font = '11px system-ui'; ctx.lineWidth = 1;
+  for (let i = 0; i <= 4; i++) {
+    const y = pad.t + ph * i / 4;
+    ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(W - pad.r, y); ctx.stroke();
+    ctx.textAlign = 'right';
+    ctx.fillText(`${100 - i * 25}%`, pad.l - 6, y + 3);
+  }
+
+  const x = (i) => pad.l + pw * (rows.length === 1 ? 0.5 : i / (rows.length - 1));
+  const y = (frac) => pad.t + ph * (1 - Math.max(0, Math.min(1, frac)));
+
+  const line = (color, get, width = 2) => {
+    ctx.strokeStyle = color; ctx.lineWidth = width;
+    ctx.beginPath();
+    rows.forEach((r, i) => { const p = [x(i), y(get(r))]; i ? ctx.lineTo(...p) : ctx.moveTo(...p); });
+    ctx.stroke();
+    ctx.fillStyle = color;
+    rows.forEach((r, i) => { ctx.beginPath(); ctx.arc(x(i), y(get(r)), 3, 0, 7); ctx.fill(); });
+  };
+
+  line('#3ddc97', (r) => r.sectorOk);
+  line('#5b9dff', (r) => maxBytes ? r.bytes / maxBytes : 0);
+  line('#ff6b6b', (r) => r.cellErr);   // 錯誤率通常很小，畫在同一軸上會貼底，看趨勢即可
+
+  // X 軸標籤
+  ctx.fillStyle = '#93a0b4'; ctx.textAlign = 'center';
+  rows.forEach((r, i) => ctx.fillText(String(r.v), x(i), H - 10));
+
+  // 表格
+  $('sweepTable').innerHTML = `<table>
+    <tr><th>${key}</th>${rows.map((r) => `<th>${r.v}</th>`).join('')}</tr>
+    <tr><td>格子錯誤率</td>${rows.map((r) => `<td>${(r.cellErr * 100).toFixed(2)}%</td>`).join('')}</tr>
+    <tr><td>分區成功率</td>${rows.map((r) => `<td>${(r.sectorOk * 100).toFixed(0)}%</td>`).join('')}</tr>
+    <tr><td>有效酬載</td>${rows.map((r) => `<td>${r.bytes} B</td>`).join('')}</tr>
+  </table>`;
+}
+
+/* ---------------- 事件 ---------------- */
+const bind = (rid, vid, fmt = (v) => v) => {
+  const r = $(rid);
+  r.addEventListener('input', () => { $(vid).textContent = fmt(r.value); });
+};
+bind('marginR', 'marginVal', (v) => (+v).toFixed(2));
+bind('rotR', 'rotVal'); bind('tiltXR', 'tiltXVal'); bind('tiltYR', 'tiltYVal');
+bind('barrelR', 'barrelVal'); bind('blurR', 'blurVal'); bind('gradR', 'gradVal');
+bind('glareR', 'glareVal'); bind('wbRR', 'wbRVal'); bind('wbBR', 'wbBVal');
+bind('gammaR', 'gammaVal'); bind('satR', 'satVal'); bind('noiseR', 'noiseVal');
+bind('jpegR', 'jpegVal'); bind('tearR', 'tearVal');
+bind('redR', 'redVal'); bind('thrR', 'thrVal'); bind('cellR', 'cellVal');
+
+$('gridR').addEventListener('input', (e) => {
+  S.cols = +e.target.value;
+  S.rows = Math.max(44, Math.round(S.cols * 9 / 16));   // 維持 16:9
+  $('gridVal').textContent = `${S.cols}×${S.rows}`;
+});
+$('cellR').addEventListener('input', (e) => { S.cellPx = +e.target.value; });
+$('redR').addEventListener('input', (e) => { S.redundancy = +e.target.value; });
+$('thrR').addEventListener('input', (e) => { S.threshold = +e.target.value; });
+$('palSeg').addEventListener('click', (e) => {
+  const b = e.target.closest('button'); if (!b) return;
+  S.level = +b.dataset.level;
+  [...$('palSeg').children].forEach((c) => c.classList.toggle('on', c === b));
+});
+
+/** 把一組失真參數套回滑桿 */
+function applyPreset(p) {
+  $('marginR').value = p.margin; $('rotR').value = p.rotate;
+  $('tiltXR').value = p.tiltX; $('tiltYR').value = p.tiltY;
+  $('barrelR').value = p.barrel; $('blurR').value = p.blur;
+  $('gradR').value = p.gradient; $('glareR').value = p.glare;
+  $('wbRR').value = p.wb[0]; $('wbBR').value = p.wb[2];
+  $('gammaR').value = p.gamma; $('satR').value = p.saturation;
+  $('noiseR').value = p.noise; $('jpegR').value = p.jpegQuality;
+  $('tearR').value = 0;
+  for (const [rid, vid, fmt] of [
+    ['marginR', 'marginVal', (v) => (+v).toFixed(2)], ['rotR', 'rotVal'], ['tiltXR', 'tiltXVal'],
+    ['tiltYR', 'tiltYVal'], ['barrelR', 'barrelVal'], ['blurR', 'blurVal'], ['gradR', 'gradVal'],
+    ['glareR', 'glareVal'], ['wbRR', 'wbRVal'], ['wbBR', 'wbBVal'], ['gammaR', 'gammaVal'],
+    ['satR', 'satVal'], ['noiseR', 'noiseVal'], ['jpegR', 'jpegVal'], ['tearR', 'tearVal'],
+  ]) $(vid).textContent = (fmt || ((v) => v))($(rid).value);
+}
+
+$('btnMedium').addEventListener('click', () => { applyPreset(MEDIUM_DISTORTION); run(); });
+$('btnNone').addEventListener('click', () => { applyPreset(NO_DISTORTION); run(); });
+$('btnRun').addEventListener('click', run);
+$('btnSweep').addEventListener('click', sweep);
+
+// 供自動化測試使用
+window.__sim = { run, sweep, simulate, buildFrame, readDistortion, S };
+
+run();
+</script>
+</body>
+</html>

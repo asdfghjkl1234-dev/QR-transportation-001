@@ -1,0 +1,666 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>彩色矩陣碼串流 v3 — 發送端</title>
+<style>
+  :root{--bg:#0b0e13;--panel:#141922;--panel2:#0e1219;--border:#232b38;--text:#e8ecf3;
+        --muted:#93a0b4;--accent:#5b9dff;--accent2:#8b5cff;--ok:#3ddc97;--warn:#ffbe4d;--danger:#ff6b6b}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);min-height:100vh;
+       font:14px/1.6 system-ui,-apple-system,"Noto Sans TC","Microsoft JhengHei",sans-serif}
+  .wrap{max-width:1280px;margin:0 auto;padding:22px 16px 48px}
+  h1{font-size:20px;margin:0 0 2px}
+  h1 .tag{font-size:11px;padding:2px 8px;border-radius:999px;vertical-align:middle;
+          background:linear-gradient(90deg,var(--accent),var(--accent2));color:#fff;margin-left:8px}
+  .sub{color:var(--muted);font-size:13px;margin:0 0 18px}
+  .sub a{color:var(--accent)}
+  .layout{display:grid;grid-template-columns:340px 1fr;gap:18px;align-items:start}
+  @media(max-width:940px){.layout{grid-template-columns:1fr}}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px}
+  .card+.card{margin-top:14px}
+  .card h2{font-size:12px;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);
+           margin:0 0 12px;font-weight:600}
+  #drop{border:2px dashed var(--border);border-radius:10px;padding:24px 14px;text-align:center;
+        cursor:pointer;transition:border-color .15s,background .15s}
+  #drop:hover,#drop.over{border-color:var(--accent);background:rgba(91,157,255,.07)}
+  #drop .big{font-size:15px;margin-bottom:3px}#drop .small{color:var(--muted);font-size:12px}
+  #fileInput{display:none}
+  .presets{display:grid;grid-template-columns:repeat(2,1fr);gap:8px}
+  @media(min-width:560px){.presets{grid-template-columns:repeat(4,1fr)}}
+  .preset{padding:10px 6px;border-radius:9px;border:1px solid var(--border);background:var(--panel2);
+          color:var(--text);cursor:pointer;text-align:center}
+  .preset:hover{border-color:var(--accent)}
+  .preset.on{border-color:var(--accent);background:rgba(91,157,255,.14)}
+  .preset .nm{font-weight:600;font-size:13px}.preset .ds{color:var(--muted);font-size:10.5px;margin-top:2px}
+  .ctl{margin-bottom:13px}.ctl:last-child{margin-bottom:0}
+  .ctl label{display:flex;justify-content:space-between;align-items:baseline;font-size:13px;margin-bottom:4px}
+  .ctl .val{color:var(--accent);font-variant-numeric:tabular-nums;font-weight:600}
+  input[type=range]{width:100%;accent-color:var(--accent)}
+  .hint{color:var(--muted);font-size:11.5px;margin-top:3px}
+  .seg{display:flex;gap:6px;flex-wrap:wrap}
+  .seg button{flex:1;min-width:54px;padding:7px 4px;border-radius:8px;border:1px solid var(--border);
+              background:transparent;color:var(--muted);cursor:pointer;font-size:12.5px}
+  .seg button.on{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+  .check{display:flex;gap:8px;align-items:flex-start;font-size:13px;cursor:pointer}
+  .check input{margin-top:4px;accent-color:var(--accent)}
+  .buttons{display:flex;gap:8px;flex-wrap:wrap}
+  button.btn{padding:10px 16px;border-radius:9px;border:1px solid var(--border);background:var(--panel2);
+             color:var(--text);cursor:pointer;font-size:14px}
+  button.btn:hover:not(:disabled){border-color:var(--accent)}
+  button.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+  button.btn:disabled{opacity:.4;cursor:not-allowed}
+  .kv{display:grid;grid-template-columns:auto 1fr;gap:3px 14px;font-size:13px}
+  .kv dt{color:var(--muted)}.kv dd{margin:0;font-variant-numeric:tabular-nums;word-break:break-all}
+  .note{border-radius:9px;padding:10px 12px;font-size:12.5px;margin-top:12px}
+  .note.warn{background:rgba(255,190,77,.1);border:1px solid rgba(255,190,77,.35);color:var(--warn)}
+  .note.err{background:rgba(255,107,107,.1);border:1px solid rgba(255,107,107,.35);color:var(--danger)}
+  .note.info{background:rgba(91,157,255,.1);border:1px solid rgba(91,157,255,.32);color:var(--accent)}
+  .hidden{display:none!important}
+  #stage{background:#fff;border-radius:10px;display:flex;align-items:center;justify-content:center;
+         min-height:440px;overflow:hidden;position:relative}
+  #stage.idle{background:var(--panel2);border:1px dashed var(--border);color:var(--muted)}
+  #screen{display:block;image-rendering:pixelated}
+  #stage:fullscreen{background:#fff;min-height:100vh;width:100vw;border-radius:0}
+  #calLabel{position:absolute;left:0;right:0;bottom:6px;text-align:center;color:#000;font-size:13px;
+            font-weight:600;background:rgba(255,255,255,.88);padding:3px}
+  .statbar{display:flex;gap:16px;flex-wrap:wrap;margin-top:12px;font-size:12.5px;color:var(--muted);
+           font-variant-numeric:tabular-nums}
+  .statbar b{color:var(--text);font-weight:600}
+  .badge{display:inline-block;font-size:11px;padding:2px 7px;border-radius:999px;background:var(--panel2);
+         color:var(--muted);border:1px solid var(--border)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>彩色矩陣碼串流 — 發送端<span class="tag">v3</span></h1>
+  <p class="sub">
+    整片全螢幕彩色矩陣，四角定位、時序軌校正、分區 RS + 噴泉碼。
+    接收端請開 <a href="receiver.html">v3 的 receiver.html</a>。
+    也可以先用 <a href="simulator.html">模擬器</a> 找出適合的參數。
+    <a href="../v2/sender.html" style="color:var(--muted)">（v2 在這裡）</a>
+  </p>
+
+  <div class="layout">
+    <div>
+      <div class="card">
+        <h2>1. 選擇檔案</h2>
+        <div id="drop">
+          <div class="big">拖放檔案到這裡</div>
+          <div class="small">或點擊選擇</div>
+        </div>
+        <input type="file" id="fileInput">
+        <div id="fileInfo" class="hidden" style="margin-top:14px">
+          <dl class="kv">
+            <dt>檔名</dt><dd id="fName">—</dd>
+            <dt>大小</dt><dd id="fSize">—</dd>
+            <dt>每幀容量</dt><dd id="fFrame">—</dd>
+            <dt>預估吞吐</dt><dd id="fRate">—</dd>
+            <dt>預估時間</dt><dd id="fEta">—</dd>
+          </dl>
+        </div>
+        <label class="check hidden" id="cmpRow" style="margin-top:14px">
+          <input type="checkbox" id="cmpOpt">
+          <span>傳送前轉 WebP 並縮圖
+            <div class="hint">大幅縮短傳輸時間</div></span>
+        </label>
+        <div id="cmpCtls" class="hidden" style="margin-top:10px">
+          <div class="ctl"><label>最長邊 <span class="val" id="dimVal">1280 px</span></label>
+            <input type="range" id="dimR" min="320" max="2560" step="80" value="1280"></div>
+          <div class="ctl"><label>品質 <span class="val" id="qVal">0.78</span></label>
+            <input type="range" id="qR" min="0.3" max="0.95" step="0.02" value="0.78"></div>
+        </div>
+        <div id="sizeWarn" class="note warn hidden"></div>
+        <div id="errBox" class="note err hidden"></div>
+      </div>
+
+      <div class="card">
+        <h2>2. 預設組合</h2>
+        <div class="presets" id="presets">
+          <button class="preset" data-preset="stable">
+            <div class="nm">穩定</div><div class="ds">C4 · 14px · 8fps</div></button>
+          <button class="preset on" data-preset="standard">
+            <div class="nm">標準</div><div class="ds">C8 · 10px · 10fps</div></button>
+          <button class="preset" data-preset="extreme">
+            <div class="nm">極限</div><div class="ds">C8 · 8px · 12fps</div></button>
+          <button class="preset" data-preset="tripod">
+            <div class="nm">腳架</div><div class="ds">C8+形狀 · 8px · 8fps</div></button>
+        </div>
+        <div class="hint" style="margin-top:8px">
+          不確定用哪一個就先跑「校準模式」，接收端會直接告訴你建議設定
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>3. 進階設定</h2>
+        <div class="ctl">
+          <label>調色盤</label>
+          <div class="seg" id="palSeg">
+            <button data-level="4">C4（2 bit/格）</button>
+            <button data-level="8" class="on">C8（3 bit/格）</button>
+            <button data-level="32">C8+形狀（5 bit/格，實驗）</button>
+          </div>
+        </div>
+        <div class="ctl">
+          <label>每格實體像素 <span class="val" id="cellVal">10</span></label>
+          <input type="range" id="cellR" min="6" max="20" step="1" value="10">
+          <div class="hint" id="cellHint"></div>
+        </div>
+        <div class="ctl">
+          <label>幀率 FPS <span class="val" id="fpsVal">10</span></label>
+          <input type="range" id="fpsR" min="4" max="30" step="1" value="10">
+          <div class="hint" id="fpsHint">實際幀率會對齊螢幕更新率</div>
+        </div>
+        <div class="ctl">
+          <label>RS 冗餘 <span class="val" id="redVal">0.25</span></label>
+          <input type="range" id="redR" min="0.1" max="0.4" step="0.05" value="0.25">
+        </div>
+        <div class="ctl">
+          <label>分區數</label>
+          <div class="seg" id="secSeg">
+            <button data-sec="3x2">3×2</button>
+            <button data-sec="4x3" class="on">4×3</button>
+            <button data-sec="5x4">5×4</button>
+          </div>
+          <div class="hint">分區越多，單一反光或撕裂影響的比例越小，但每區的 RS 也越短</div>
+        </div>
+        <label class="check" style="margin-top:4px">
+          <input type="checkbox" id="sysOpt" checked>
+          <span>系統區塊優先
+            <div class="hint">沿用 v2 的設計。實測有漏幀時關掉反而較快</div></span>
+        </label>
+      </div>
+    </div>
+
+    <div>
+      <div class="card">
+        <div class="buttons">
+          <button class="btn primary" id="btnStart" disabled>開始播放</button>
+          <button class="btn" id="btnPause" disabled>暫停</button>
+          <button class="btn" id="btnFull" disabled>全螢幕</button>
+          <button class="btn" id="btnCal">校準模式</button>
+        </div>
+        <div class="statbar">
+          <span>幀 <b id="sFrame">—</b></span>
+          <span>已送 <b id="sBytes">0</b></span>
+          <span>目標 <b id="sTarget">—</b></span>
+          <span>實測 <b id="sFps">—</b></span>
+          <span>緩衝 <b id="sBuf">0</b></span>
+          <span>螢幕 <b id="sHz">量測中…</b></span>
+          <span>網格 <b id="sGrid">—</b></span>
+        </div>
+        <div id="calNote" class="note info hidden"></div>
+        <div id="screenTip" class="note warn hidden"></div>
+      </div>
+
+      <div class="card" style="padding:12px">
+        <div id="stage" class="idle">
+          <span id="stageHint">選好檔案後按「開始播放」</span>
+          <canvas id="screen" class="hidden"></canvas>
+          <div id="calLabel" class="hidden"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script type="module">
+import { makeLayout, frameCapacity } from './format.js';
+import { sha256Hex } from '../fountain.js';
+
+const $ = (id) => document.getElementById(id);
+
+/* =====================================================================
+ * 狀態（全部在記憶體，不使用 localStorage）
+ * ===================================================================== */
+const S = {
+  file: null, payload: null, payloadName: '', payloadType: '',
+  level: 8, cellPx: 10, fps: 10, redundancy: 0.25, sectorsX: 4, sectorsY: 3,
+  systematic: true,
+  cols: 0, rows: 0,
+
+  worker: null, ready: null,
+  queue: [], requested: 0,
+  playing: false, rafId: 0,
+  refreshHz: 60, holdFrames: 6, tick: 0,
+  framesShown: 0, bytesSent: 0, fpsWindow: [],
+  calibrating: false, calStep: 0, calTimer: 0,
+};
+
+const TARGET_BUFFER = 30;   // 需求指定：預先產生 30 幀
+const REFILL_AT = 12;
+
+const fmtBytes = (n) => n < 1024 ? `${n} B`
+  : n < 1048576 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1048576).toFixed(2)} MB`;
+const fmtDur = (s) => !isFinite(s) ? '—' : s < 60 ? `${Math.ceil(s)} 秒`
+  : `${Math.floor(s / 60)} 分 ${Math.round(s % 60)} 秒`;
+
+function showErr(msg) {
+  const b = $('errBox');
+  if (!msg) { b.classList.add('hidden'); return; }
+  b.textContent = msg; b.classList.remove('hidden');
+}
+
+/* =====================================================================
+ * 螢幕更新率與節奏
+ * =====================================================================
+ * v3 和 v2 一樣以「刷新週期」計時而不是毫秒，而且只在刷新邊界換畫面。
+ * 對相機來說，每張圖的曝光時間一致非常重要 —— 長短不一會讓某些幀
+ * 剛好被拍到一半，產生撕裂。
+ */
+async function measureRefreshRate() {
+  const samples = [];
+  let last = 0;
+  await new Promise((resolve) => {
+    let n = 0;
+    const step = (t) => {
+      if (last) samples.push(t - last);
+      last = t;
+      if (++n < 40) requestAnimationFrame(step); else resolve();
+    };
+    requestAnimationFrame(step);
+  });
+  samples.sort((a, b) => a - b);
+  const median = samples[samples.length >> 1] || 16.7;
+  S.refreshHz = Math.round(1000 / median);
+  const common = [60, 75, 90, 120, 144, 165, 240];
+  const near = common.find((h) => Math.abs(h - S.refreshHz) <= 4);
+  if (near) S.refreshHz = near;
+  $('sHz').textContent = `${S.refreshHz} Hz`;
+  updateTiming();
+}
+
+function updateTiming() {
+  S.holdFrames = Math.max(1, Math.round(S.refreshHz / S.fps));
+  const actual = S.refreshHz / S.holdFrames;
+  $('sTarget').textContent = `${actual.toFixed(1)} FPS`;
+  $('fpsHint').textContent =
+    `每張圖停留 ${S.holdFrames} 個刷新週期 → 實際 ${actual.toFixed(1)} FPS（螢幕 ${S.refreshHz} Hz）`;
+  return actual;
+}
+
+/* =====================================================================
+ * 依螢幕與格子大小算出網格尺寸
+ * ===================================================================== */
+function computeGrid() {
+  // 以實體像素為準（考慮 devicePixelRatio），並保留白邊
+  const dpr = window.devicePixelRatio || 1;
+  const availW = Math.floor(window.screen.width * dpr);
+  const availH = Math.floor(window.screen.height * dpr);
+  const quiet = 3;
+  S.cols = Math.max(44, Math.floor(availW / S.cellPx) - quiet * 2);
+  S.rows = Math.max(44, Math.floor(availH / S.cellPx) - quiet * 2);
+  $('sGrid').textContent = `${S.cols}×${S.rows}`;
+  $('cellHint').textContent =
+    `螢幕 ${availW}×${availH} 實體像素 → ${S.cols}×${S.rows} 格`;
+}
+
+/** 依目前設定算出每幀能載多少位元組 */
+function currentCapacity() {
+  try {
+    const layout = makeLayout(S.cols, S.rows, S.sectorsX, S.sectorsY);
+    const cap = frameCapacity(layout, S.level, S.redundancy);
+    const blockSize = cap.payloadPerSector - 15;   // 扣掉噴泉碼封包標頭
+    return { ...cap, blockSize, bytesPerFrame: blockSize * cap.sectorCount };
+  } catch {
+    return null;
+  }
+}
+
+function updateEstimate() {
+  computeGrid();
+  const cap = currentCapacity();
+  if (!cap || cap.blockSize < 8) {
+    // 格子太大或分區太多時，每個分區裝不下一個噴泉碼封包（標頭就要 15 bytes）。
+    // 這種設定不是「效率差」而是「根本不能用」，所以直接擋住開始鍵並說明怎麼改。
+    $('fFrame').textContent = '設定無效';
+    $('fRate').textContent = '—';
+    $('fEta').textContent = '—';
+    $('btnStart').disabled = true;
+    showErr(`目前設定下每個分區只能載 ${cap ? cap.payloadPerSector : 0} bytes，`
+      + `扣掉 15 bytes 的封包標頭之後放不下資料。`
+      + `請「縮小格子」、「減少分區數」，或換一個解析度更高的螢幕。`
+      + `（目前網格 ${S.cols}×${S.rows}，分區 ${S.sectorsX}×${S.sectorsY}）`);
+    return;
+  }
+  showErr('');
+  if (S.payload) $('btnStart').disabled = false;
+  const actualFps = S.refreshHz / S.holdFrames;
+  // 每 15 幀有一個分區改放 metadata，所以資料量要打折
+  const eff = cap.bytesPerFrame * (14 / 15) + (cap.bytesPerFrame / cap.sectorCount) * (1 / 15) * 0;
+  const rate = cap.bytesPerFrame * actualFps * (14 / 15);
+
+  $('fFrame').textContent = `${cap.bytesPerFrame} B（${cap.sectorCount} 區 × ${cap.blockSize} B）`;
+  $('fRate').textContent = `${(rate / 1024).toFixed(1)} KB/s`;
+
+  if (S.payload) {
+    // 噴泉碼開銷約 1.05
+    const seconds = (S.payload.length * 1.05) / rate;
+    $('fEta').textContent = `約 ${fmtDur(seconds)}`;
+  }
+}
+
+/* =====================================================================
+ * 預設組合
+ * ===================================================================== */
+const PRESETS = {
+  stable:   { level: 4,  cellPx: 14, fps: 8,  redundancy: 0.25 },
+  standard: { level: 8,  cellPx: 10, fps: 10, redundancy: 0.25 },
+  extreme:  { level: 8,  cellPx: 8,  fps: 12, redundancy: 0.25 },
+  // 形狀層每格多帶 2 bits，但對幾何精度的要求高一個等級：
+  // 實測手持（中等失真）時 8px 格會整幀垮掉，腳架或貼著螢幕拍才穩。
+  // 幀率也刻意壓低，因為解碼一幀要兩三倍的時間。
+  tripod:   { level: 32, cellPx: 8,  fps: 8,  redundancy: 0.25 },
+};
+
+function applyPreset(name) {
+  Object.assign(S, PRESETS[name]);
+  $('cellR').value = S.cellPx; $('cellVal').textContent = S.cellPx;
+  $('fpsR').value = S.fps; $('fpsVal').textContent = S.fps;
+  $('redR').value = S.redundancy; $('redVal').textContent = S.redundancy;
+  setSeg('palSeg', 'level', String(S.level));
+  [...$('presets').children].forEach((b) => b.classList.toggle('on', b.dataset.preset === name));
+  updateTiming(); updateEstimate();
+}
+const setSeg = (segId, key, value) =>
+  [...$(segId).children].forEach((b) => b.classList.toggle('on', b.dataset[key] === value));
+
+/* =====================================================================
+ * 檔案
+ * ===================================================================== */
+async function handleFile(file) {
+  showErr('');
+  S.file = file;
+  $('fileInfo').classList.remove('hidden');
+  $('fName').textContent = file.name;
+  const isImage = file.type.startsWith('image/');
+  $('cmpRow').classList.toggle('hidden', !isImage);
+  if (!isImage) $('cmpOpt').checked = false;
+  $('cmpCtls').classList.toggle('hidden', !(isImage && $('cmpOpt').checked));
+  await preparePayload();
+}
+
+async function preparePayload() {
+  if (!S.file) return;
+  $('fSize').textContent = '處理中…';
+  $('btnStart').disabled = true;
+  const useCmp = $('cmpOpt').checked && S.file.type.startsWith('image/');
+  try {
+    if (useCmp) {
+      const r = await compressImage(S.file, Number($('dimR').value), Number($('qR').value));
+      S.payload = r.bytes; S.payloadName = r.name; S.payloadType = r.type;
+    } else {
+      S.payload = new Uint8Array(await S.file.arrayBuffer());
+      S.payloadName = S.file.name;
+      S.payloadType = S.file.type || 'application/octet-stream';
+    }
+  } catch (e) {
+    showErr('讀取或壓縮失敗：' + e.message);
+    return;
+  }
+  const n = S.payload.length, orig = S.file.size;
+  $('fSize').textContent = useCmp
+    ? `${fmtBytes(n)}（原檔 ${fmtBytes(orig)}，壓到 ${(n / orig * 100).toFixed(0)}%）`
+    : fmtBytes(n);
+
+  const warn = $('sizeWarn');
+  if (S.file.type.startsWith('video/') && n > 10 * 1024 * 1024) {
+    warn.classList.remove('hidden');
+    warn.innerHTML = `⚠️ 影片 ${fmtBytes(n)} 超過 10 MB，建議先壓到 720p 以下、降低位元率再傳。`;
+  } else warn.classList.add('hidden');
+
+  updateEstimate();
+  $('btnStart').disabled = false;
+  $('btnFull').disabled = false;
+}
+
+async function compressImage(file, maxDim, quality) {
+  const bmp = await createImageBitmap(file);
+  const scale = Math.min(1, maxDim / Math.max(bmp.width, bmp.height));
+  const w = Math.max(1, Math.round(bmp.width * scale));
+  const h = Math.max(1, Math.round(bmp.height * scale));
+  const cv = document.createElement('canvas');
+  cv.width = w; cv.height = h;
+  cv.getContext('2d').drawImage(bmp, 0, 0, w, h);
+  bmp.close();
+  let blob = await new Promise((r) => cv.toBlob(r, 'image/webp', quality));
+  let type = 'image/webp';
+  if (!blob || blob.type !== 'image/webp') {
+    blob = await new Promise((r) => cv.toBlob(r, 'image/jpeg', quality));
+    type = 'image/jpeg';
+  }
+  if (!blob) throw new Error('瀏覽器無法輸出壓縮圖片');
+  const ext = type === 'image/webp' ? '.webp' : '.jpg';
+  return { bytes: new Uint8Array(await blob.arrayBuffer()), name: file.name.replace(/\.[^.]+$/, '') + ext, type };
+}
+
+/* =====================================================================
+ * Worker
+ * ===================================================================== */
+function startWorker(data, meta) {
+  return new Promise((resolve, reject) => {
+    if (S.worker) S.worker.terminate();
+    S.worker = new Worker(new URL('./encoder-worker.js', import.meta.url), { type: 'module' });
+    S.queue = []; S.requested = 0;
+
+    S.worker.onmessage = (e) => {
+      const m = e.data;
+      if (m.type === 'ready') { S.ready = m; resolve(m); return; }
+      if (m.type === 'error') { reject(new Error(m.message)); return; }
+      if (m.type === 'frames') {
+        for (const f of m.frames) S.queue.push(f);
+        S.requested -= m.frames.length;
+        $('sBuf').textContent = S.queue.length;
+      }
+    };
+    S.worker.onerror = (err) => reject(new Error(err.message || 'worker 發生錯誤'));
+
+    S.worker.postMessage({
+      type: 'init', data, meta,
+      sessionId: (Math.random() * 65536) & 0xffff,
+      cfg: {
+        cols: S.cols, rows: S.rows, level: S.level, cellPx: S.cellPx,
+        sectorsX: S.sectorsX, sectorsY: S.sectorsY,
+        redundancy: S.redundancy, systematic: S.systematic,
+      },
+    });
+  });
+}
+
+function topUp() {
+  const want = TARGET_BUFFER - S.queue.length - S.requested;
+  if (want <= 0) return;
+  S.worker.postMessage({ type: 'produce', count: want });
+  S.requested += want;
+}
+
+/* =====================================================================
+ * 繪製與播放
+ * ===================================================================== */
+const screen = $('screen');
+const sctx = screen.getContext('2d', { alpha: false });
+
+function drawFrame(f) {
+  // worker 產生的 bitmap 已經是最終尺寸（1 格 = cellPx 實體像素），
+  // 這裡不做任何縮放 —— 縮放會破壞「每格對齊整數實體像素」這個前提。
+  if (screen.width !== f.W || screen.height !== f.H) { screen.width = f.W; screen.height = f.H; }
+  const dpr = window.devicePixelRatio || 1;
+  screen.style.width = `${f.W / dpr}px`;
+  screen.style.height = `${f.H / dpr}px`;
+  sctx.imageSmoothingEnabled = false;
+  sctx.drawImage(f.bitmap, 0, 0);
+  f.bitmap.close();
+}
+
+function loop() {
+  if (!S.playing) return;
+  S.rafId = requestAnimationFrame(loop);
+  if (++S.tick < S.holdFrames) return;    // 只在刷新邊界換畫面
+  S.tick = 0;
+
+  const f = S.queue.shift();
+  if (!f) return;                          // 緩衝空了就維持原畫面
+
+  drawFrame(f);
+  S.framesShown++;
+  S.bytesSent += f.dataSectors * (S.ready?.blockSize || 0);
+  $('sFrame').textContent = f.frameSeq;
+  $('sBytes').textContent = fmtBytes(S.bytesSent);
+  $('sBuf').textContent = S.queue.length;
+
+  const now = performance.now();
+  S.fpsWindow.push(now);
+  while (S.fpsWindow.length && now - S.fpsWindow[0] > 1000) S.fpsWindow.shift();
+  $('sFps').textContent = `${S.fpsWindow.length} FPS`;
+
+  if (S.queue.length + S.requested < REFILL_AT) topUp();
+}
+
+async function start(data, meta, label) {
+  showErr('');
+  computeGrid();
+  try {
+    const ready = await startWorker(data, meta);
+    $('fFrame').textContent = `${ready.sectorCount * ready.blockSize} B（${ready.sectorCount} 區 × ${ready.blockSize} B）`;
+    $('stage').classList.remove('idle');
+    $('stageHint').classList.add('hidden');
+    screen.classList.remove('hidden');
+    $('calLabel').classList.toggle('hidden', !label);
+    if (label) $('calLabel').textContent = label;
+
+    S.framesShown = 0; S.bytesSent = 0; S.fpsWindow = []; S.tick = 0;
+    topUp();
+    S.playing = true;
+    $('btnStart').textContent = '重新開始';
+    $('btnPause').disabled = false; $('btnPause').textContent = '暫停';
+    S.rafId = requestAnimationFrame(loop);
+  } catch (e) {
+    showErr('啟動編碼器失敗：' + e.message);
+  }
+}
+
+function startNormal() {
+  stopCalibration();
+  if (!S.payload) return;
+  start(S.payload, { name: S.payloadName, type: S.payloadType });
+}
+const pause = () => { S.playing = false; cancelAnimationFrame(S.rafId); $('btnPause').textContent = '繼續'; };
+const resume = () => { if (!S.worker) return; S.playing = true; $('btnPause').textContent = '暫停';
+                       S.rafId = requestAnimationFrame(loop); };
+
+/* =====================================================================
+ * 校準模式
+ * =====================================================================
+ * 依序播放密度由低到高的測試圖樣，每一階把設定寫進 metadata 的檔名欄位。
+ * 接收端解出檔名就知道現在是第幾階，可以算出每一階的錯誤率，
+ * 最後直接給出「建議發送端使用哪一組設定」。
+ */
+const CAL_STEPS = [
+  { level: 4, cellPx: 14, fps: 8 },
+  { level: 4, cellPx: 10, fps: 10 },
+  { level: 8, cellPx: 12, fps: 10 },
+  { level: 8, cellPx: 10, fps: 10 },
+  { level: 8, cellPx: 8, fps: 12 },
+  { level: 8, cellPx: 6, fps: 12 },
+];
+
+function startCalibration() {
+  stopCalibration();
+  S.calibrating = true; S.calStep = 0;
+  $('calNote').classList.remove('hidden');
+  $('btnCal').textContent = '結束校準';
+  nextCalStep();
+}
+
+function nextCalStep() {
+  if (!S.calibrating) return;
+  if (S.calStep >= CAL_STEPS.length) { stopCalibration(); return; }
+  const step = CAL_STEPS[S.calStep];
+  Object.assign(S, step);
+  updateTiming(); computeGrid();
+
+  const idx = S.calStep + 1;
+  const label = `第 ${idx}/${CAL_STEPS.length} 階：C${step.level} · ${step.cellPx}px · ${step.fps} FPS`;
+  $('calNote').innerHTML = `<b>校準模式</b>　${label}<br>`
+    + `每階播放 8 秒。請看接收端的「格子錯誤率」，`
+    + `錯誤率開始上升的前一階就是這組螢幕與手機的穩定上限；`
+    + `接收端最後會直接給出建議設定。`;
+
+  const testData = new Uint8Array(80 * 1024);
+  for (let i = 0; i < testData.length; i++) testData[i] = (i * 37 + S.calStep * 91) & 255;
+  // 把設定編進檔名，接收端解出 metadata 就知道現在是哪一階
+  start(testData, { name: `CAL|${idx}|C${step.level}|${step.cellPx}px|${step.fps}fps`,
+                    type: 'application/octet-stream' }, label);
+
+  S.calStep++;
+  S.calTimer = setTimeout(nextCalStep, 8000);
+}
+
+function stopCalibration() {
+  if (S.calTimer) clearTimeout(S.calTimer);
+  S.calTimer = 0;
+  if (!S.calibrating) return;
+  S.calibrating = false; S.playing = false;
+  cancelAnimationFrame(S.rafId);
+  $('calNote').classList.add('hidden');
+  $('calLabel').classList.add('hidden');
+  $('btnCal').textContent = '校準模式';
+}
+
+/* =====================================================================
+ * 事件
+ * ===================================================================== */
+$('drop').addEventListener('click', () => $('fileInput').click());
+$('fileInput').addEventListener('change', (e) => e.target.files[0] && handleFile(e.target.files[0]));
+for (const t of ['dragenter', 'dragover']) $('drop').addEventListener(t, (e) => { e.preventDefault(); $('drop').classList.add('over'); });
+for (const t of ['dragleave', 'drop']) $('drop').addEventListener(t, (e) => { e.preventDefault(); $('drop').classList.remove('over'); });
+$('drop').addEventListener('drop', (e) => e.dataTransfer.files[0] && handleFile(e.dataTransfer.files[0]));
+
+$('presets').addEventListener('click', (e) => {
+  const b = e.target.closest('.preset'); if (b) applyPreset(b.dataset.preset);
+});
+$('palSeg').addEventListener('click', (e) => {
+  const b = e.target.closest('button'); if (!b) return;
+  S.level = +b.dataset.level; setSeg('palSeg', 'level', b.dataset.level); updateEstimate();
+});
+$('secSeg').addEventListener('click', (e) => {
+  const b = e.target.closest('button'); if (!b) return;
+  const [x, y] = b.dataset.sec.split('x').map(Number);
+  S.sectorsX = x; S.sectorsY = y;
+  setSeg('secSeg', 'sec', b.dataset.sec); updateEstimate();
+});
+$('cellR').addEventListener('input', (e) => { S.cellPx = +e.target.value; $('cellVal').textContent = S.cellPx; updateEstimate(); });
+$('fpsR').addEventListener('input', (e) => { S.fps = +e.target.value; $('fpsVal').textContent = S.fps; updateTiming(); updateEstimate(); });
+$('redR').addEventListener('input', (e) => { S.redundancy = +e.target.value; $('redVal').textContent = S.redundancy; updateEstimate(); });
+$('sysOpt').addEventListener('change', (e) => { S.systematic = e.target.checked; });
+$('cmpOpt').addEventListener('change', () => { $('cmpCtls').classList.toggle('hidden', !$('cmpOpt').checked); preparePayload(); });
+$('dimR').addEventListener('input', (e) => $('dimVal').textContent = `${e.target.value} px`);
+$('qR').addEventListener('input', (e) => $('qVal').textContent = e.target.value);
+$('dimR').addEventListener('change', preparePayload);
+$('qR').addEventListener('change', preparePayload);
+
+$('btnStart').addEventListener('click', startNormal);
+$('btnPause').addEventListener('click', () => S.playing ? pause() : resume());
+$('btnCal').addEventListener('click', () => S.calibrating ? stopCalibration() : startCalibration());
+$('btnFull').addEventListener('click', () => {
+  if (document.fullscreenElement) { document.exitFullscreen(); return; }
+  // 全螢幕之前提醒使用者關掉會動到顏色的螢幕功能。
+  // 這很重要：夜間模式／True Tone／自動色溫都會隨環境光「持續改變」螢幕的色溫，
+  // 而接收端的顏色參考是從色票條量出來的 —— 顏色一直漂移會讓參考失準。
+  $('screenTip').classList.remove('hidden');
+  $('screenTip').innerHTML = '📱 進入全螢幕前請先確認：'
+    + '<b>關閉夜間模式／護眼模式／True Tone／自動色溫</b>，並把<b>亮度調到最高</b>。'
+    + '這些功能會持續改變螢幕色溫，讓接收端的顏色參考一直漂移。';
+  $('stage').requestFullscreen?.().catch(() => showErr('瀏覽器拒絕進入全螢幕'));
+});
+
+window.addEventListener('resize', () => { if (!S.playing) updateEstimate(); });
+
+measureRefreshRate().then(() => { applyPreset('standard'); });
+
+// 供自動化測試使用
+window.__v3sender = S;
+</script>
+</body>
+</html>

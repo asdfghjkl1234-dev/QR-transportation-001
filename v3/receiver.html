@@ -1,0 +1,732 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>彩色矩陣碼串流 v3 — 接收端</title>
+<style>
+  :root{--bg:#0b0e13;--panel:#141922;--panel2:#0e1219;--border:#232b38;--text:#e8ecf3;
+        --muted:#93a0b4;--accent:#5b9dff;--accent2:#8b5cff;--ok:#3ddc97;--warn:#ffbe4d;--danger:#ff6b6b}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);
+       font:14px/1.6 system-ui,-apple-system,"Noto Sans TC","Microsoft JhengHei",sans-serif}
+  .wrap{max-width:780px;margin:0 auto;padding:20px 16px 48px}
+  h1{font-size:19px;margin:0 0 2px}
+  h1 .tag{font-size:11px;padding:2px 8px;border-radius:999px;vertical-align:middle;
+          background:linear-gradient(90deg,var(--accent),var(--accent2));color:#fff;margin-left:8px}
+  .sub{color:var(--muted);font-size:13px;margin:0 0 16px}.sub a{color:var(--accent)}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px}
+  .card+.card{margin-top:14px}
+  .card h2{font-size:12px;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);
+           margin:0 0 12px;font-weight:600}
+  button.btn{padding:10px 16px;border-radius:9px;border:1px solid var(--border);background:var(--panel2);
+             color:var(--text);cursor:pointer;font-size:14px}
+  button.btn:hover:not(:disabled){border-color:var(--accent)}
+  button.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+  button.btn.small{padding:6px 12px;font-size:13px}
+  button.btn:disabled{opacity:.4;cursor:not-allowed}
+  .buttons{display:flex;gap:8px;flex-wrap:wrap}
+  #camWrap{position:relative;background:#000;border-radius:10px;overflow:hidden;aspect-ratio:4/3}
+  #video{width:100%;height:100%;object-fit:cover;display:block}
+  #overlay{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
+  #camIdle{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+           color:var(--muted);font-size:13px;text-align:center;padding:20px}
+  .bar{height:10px;background:#080b10;border-radius:999px;overflow:hidden;margin:6px 0 10px}
+  .bar>div{height:100%;width:0%;background:linear-gradient(90deg,var(--accent),var(--ok));transition:width .18s}
+  .barTop{display:flex;justify-content:space-between;font-size:13px}.barTop b{font-variant-numeric:tabular-nums}
+  .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(102px,1fr));gap:9px}
+  .stat{background:var(--panel2);border-radius:9px;padding:7px 10px}
+  .stat .lbl{color:var(--muted);font-size:10.5px}
+  .stat .num{font-size:16px;font-weight:600;font-variant-numeric:tabular-nums}
+  .stat.bad .num{color:var(--danger)}.stat.good .num{color:var(--ok)}.stat.warn .num{color:var(--warn)}
+  .kv{display:grid;grid-template-columns:auto 1fr;gap:3px 14px;font-size:13px}
+  .kv dt{color:var(--muted)}.kv dd{margin:0;word-break:break-all}
+  .note{border-radius:9px;padding:10px 12px;font-size:12.5px;margin-top:12px}
+  .note.info{background:rgba(91,157,255,.1);border:1px solid rgba(91,157,255,.32);color:var(--accent)}
+  .note.ok{background:rgba(61,220,151,.1);border:1px solid rgba(61,220,151,.35);color:var(--ok)}
+  .note.warn{background:rgba(255,190,77,.1);border:1px solid rgba(255,190,77,.35);color:var(--warn)}
+  .note.err{background:rgba(255,107,107,.1);border:1px solid rgba(255,107,107,.35);color:var(--danger)}
+  .note .buttons{margin-top:10px}
+  .hidden{display:none!important}
+  #preview img,#preview video{max-width:100%;border-radius:9px;display:block;background:#000}
+  .badge{display:inline-block;font-size:11px;padding:2px 7px;border-radius:999px;background:var(--panel2);
+         color:var(--muted);border:1px solid var(--border)}
+  table{width:100%;border-collapse:collapse;font-size:12px;font-variant-numeric:tabular-nums;margin-top:8px}
+  th,td{text-align:right;padding:3px 6px;border-bottom:1px solid var(--border)}
+  th:first-child,td:first-child{text-align:left}
+  th{color:var(--muted);font-weight:600}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>彩色矩陣碼串流 — 接收端<span class="tag">v3</span></h1>
+  <p class="sub">
+    對準 <a href="sender.html">v3 的 sender.html</a> 畫面持續拍攝。
+    <a href="../v2/receiver.html" style="color:var(--muted)">（v2 在這裡）</a><br>
+    <span class="badge" id="poolBadge">工作池：準備中…</span>
+  </p>
+
+  <div class="card">
+    <div id="camWrap">
+      <video id="video" playsinline muted></video>
+      <canvas id="overlay"></canvas>
+      <div id="camIdle">按下「開啟相機」開始掃描<br>（手機需要 HTTPS 或 localhost）</div>
+    </div>
+    <div class="buttons" style="margin-top:12px">
+      <button class="btn primary" id="btnStart">開啟相機</button>
+      <button class="btn" id="btnStop" disabled>停止</button>
+      <button class="btn" id="btnReset" disabled>清除已收資料</button>
+      <button class="btn" id="btnCal">校準分析</button>
+    </div>
+    <div id="camErr" class="note err hidden"></div>
+    <div id="lockNote" class="note info hidden"></div>
+    <div id="advice" class="note warn hidden"></div>
+    <div id="sessionAsk" class="note warn hidden"></div>
+  </div>
+
+  <div class="card">
+    <h2>接收進度</h2>
+    <div class="barTop"><span id="pLabel">等待第一幀…</span><b id="pPct">0%</b></div>
+    <div class="bar"><div id="pBar"></div></div>
+    <div class="stats">
+      <div class="stat"><div class="lbl">有效幀/秒</div><div class="num" id="sFps">0</div></div>
+      <div class="stat"><div class="lbl">即時吞吐</div><div class="num" id="sKbps">0</div></div>
+      <div class="stat"><div class="lbl">格子錯誤率</div><div class="num" id="sCell">—</div></div>
+      <div class="stat"><div class="lbl">抹除比例</div><div class="num" id="sEra">—</div></div>
+      <div class="stat"><div class="lbl">分區失敗率</div><div class="num" id="sSecFail">—</div></div>
+      <div class="stat"><div class="lbl">預估剩餘</div><div class="num" id="sEta">—</div></div>
+      <div class="stat"><div class="lbl">擷取幀/秒</div><div class="num" id="sGrab">0</div></div>
+      <div class="stat"><div class="lbl">解碼耗時</div><div class="num" id="sMs">—</div></div>
+    </div>
+    <div id="metaBox" class="hidden" style="margin-top:14px">
+      <dl class="kv">
+        <dt>檔名</dt><dd id="mName">—</dd>
+        <dt>類型</dt><dd id="mType">—</dd>
+        <dt>大小</dt><dd id="mSize">—</dd>
+        <dt>設定</dt><dd id="mCfg">—</dd>
+      </dl>
+    </div>
+  </div>
+
+  <div class="card hidden" id="calCard">
+    <h2>校準分析</h2>
+    <div id="calNote" class="note info">
+      請在發送端按下「校準模式」。這裡會統計每一階設定的實測表現，最後給出建議。
+    </div>
+    <div id="calTable"></div>
+    <div id="calVerdict"></div>
+  </div>
+
+  <div class="card hidden" id="resultCard">
+    <h2>接收結果</h2>
+    <div id="resultNote"></div>
+    <div id="preview" style="margin:12px 0"></div>
+    <div class="buttons">
+      <a id="btnDownload" class="btn primary" download>下載檔案</a>
+      <button class="btn" id="btnAgain">再接收一次</button>
+    </div>
+  </div>
+</div>
+
+<script type="module">
+import { LTDecoder2, decodePacketV2 } from '../v2/fountain2.js';
+import { MetaAssembler } from './format.js';
+import { sha256Hex } from '../fountain.js';
+
+const $ = (id) => document.getElementById(id);
+
+/* =====================================================================
+ * 狀態
+ * ===================================================================== */
+const S = {
+  stream: null, track: null, scanning: false, finished: false,
+  pool: [], jobId: 0,
+  hint: null,                 // 已知的網格尺寸，成功解出第一幀後就一直帶著
+  redundancy: 0.25, threshold: 0.82,
+  decoder: null, sessionId: null, ignoredSession: null, pendingSession: null,
+  pendingPackets: [], metadata: null, metaAsm: new MetaAssembler(),
+  validFrames: 0, totalFrames: 0, failedFrames: 0,
+  sectorTried: 0, sectorFailed: 0,
+  rateWindow: [], byteWindow: [], grabWindow: [],
+  lastMs: 0, lastCellErr: null, lastEra: null, lastRms: 0,
+  quads: null, quadFlags: null,
+  objectUrl: null, rafId: 0,
+  lockState: 'idle', firstSeenAt: 0,   // 對焦鎖定的狀態機
+  adviceShownAt: 0,
+  calibrating: false, calStats: new Map(),
+};
+
+const fmtBytes = (n) => n < 1024 ? `${n} B`
+  : n < 1048576 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1048576).toFixed(2)} MB`;
+const fmtDur = (s) => !isFinite(s) || s < 0 ? '—' : s < 60 ? `${Math.ceil(s)} 秒`
+  : `${Math.floor(s / 60)} 分 ${Math.round(s % 60)} 秒`;
+function showNote(id, cls, html) {
+  const el = $(id);
+  if (!html) { el.classList.add('hidden'); return; }
+  el.className = `note ${cls}`; el.innerHTML = html; el.classList.remove('hidden');
+}
+
+/* =====================================================================
+ * Worker 工作池
+ * ===================================================================== */
+function initPool() {
+  const size = Math.max(2, Math.min(4, (navigator.hardwareConcurrency || 4) - 1));
+  for (let i = 0; i < size; i++) {
+    const w = new Worker(new URL('./decoder-worker.js', import.meta.url), { type: 'module' });
+    const slot = { worker: w, busy: false };
+    w.onmessage = (e) => {
+      const m = e.data;
+      if (m.type === 'ready') return;
+      if (m.type === 'result') { slot.busy = false; onResult(m); }
+    };
+    w.onerror = (err) => {
+      slot.busy = false;
+      showNote('camErr', 'err', '解碼工作執行緒發生錯誤：' + (err.message || '未知'));
+    };
+    S.pool.push(slot);
+  }
+  $('poolBadge').textContent = `工作池：${size} 個 Worker`;
+}
+
+/* =====================================================================
+ * 相機
+ * ===================================================================== */
+async function startCamera() {
+  showNote('camErr', 'err', '');
+  // 一律用 ideal（軟性偏好）並由嚴到寬降級。
+  // 用 min/exact 的話，裝置達不到就直接丟 OverconstrainedError，
+  // 結果是「完全沒有相機」而不是「規格低一點的相機」。
+  const attempts = [
+    { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30 } },
+    { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } },
+    { facingMode: { ideal: 'environment' } },
+    true,
+  ];
+  let lastErr = null;
+  for (const video of attempts) {
+    try { S.stream = await navigator.mediaDevices.getUserMedia({ video, audio: false }); lastErr = null; break; }
+    catch (e) { lastErr = e; if (e.name === 'NotAllowedError' || e.name === 'NotFoundError') break; }
+  }
+  if (lastErr) {
+    let msg = `無法開啟相機：${lastErr.name}`;
+    if (lastErr.name === 'NotAllowedError') msg = '相機權限被拒絕，請在瀏覽器設定中允許後再試。';
+    else if (lastErr.name === 'NotFoundError') msg = '找不到相機裝置。';
+    else if (!window.isSecureContext) {
+      msg = '這個頁面不是安全來源（HTTPS 或 localhost），瀏覽器不允許存取相機。'
+          + '請用 HTTPS 部署，或參考 README 的 cloudflared 通道做法。';
+    }
+    showNote('camErr', 'err', msg);
+    return;
+  }
+
+  const video = $('video');
+  video.srcObject = S.stream;
+  await video.play();
+  S.track = S.stream.getVideoTracks()[0];
+  const st = S.track.getSettings();
+  $('camIdle').classList.add('hidden');
+  $('poolBadge').textContent += `　·　${st.width}×${st.height}@${st.frameRate ? Math.round(st.frameRate) : '?'}fps`;
+
+  $('btnStart').disabled = true; $('btnStop').disabled = false; $('btnReset').disabled = false;
+  S.scanning = true;
+  S.lockState = 'searching';
+  scheduleScan();
+}
+
+/**
+ * 鎖定對焦、曝光與白平衡。
+ *
+ * 時機刻意選在「已經穩定看到定位標記一秒之後」，而不是相機一開就鎖：
+ *   - 太早鎖：使用者可能還沒把手機對準螢幕，會把桌面或牆壁的對焦距離鎖住。
+ *   - 不鎖：自動對焦會不斷來回搜尋，每次搜尋期間畫面都是糊的；
+ *     自動白平衡更麻煩 —— 它會隨著畫面上顏色的分佈持續漂移，
+ *     而我們的顏色參考是從色票條量出來的，參考本身跟著漂就失去意義。
+ */
+async function lockCamera() {
+  if (!S.track || !S.track.getCapabilities) return;
+  let caps = {};
+  try { caps = S.track.getCapabilities() || {}; } catch { return; }
+  const advanced = [];
+  const pick = (key, prefer) => {
+    const list = caps[key];
+    if (!Array.isArray(list)) return;
+    for (const mode of prefer) if (list.includes(mode)) { advanced.push({ [key]: mode }); return; }
+  };
+  // manual 需要自己給距離／曝光值，多數手機不支援；continuous 已能大幅減少來回跳動
+  pick('focusMode', ['continuous', 'manual']);
+  pick('exposureMode', ['continuous', 'manual']);
+  pick('whiteBalanceMode', ['continuous', 'manual']);
+  if (!advanced.length) {
+    showNote('lockNote', 'info', '這台裝置不支援鎖定對焦／曝光／白平衡，仍可正常接收。');
+    return;
+  }
+  try {
+    await S.track.applyConstraints({ advanced });
+    showNote('lockNote', 'info',
+      `已鎖定：${advanced.map((a) => Object.keys(a)[0].replace('Mode', '')).join('、')}。`
+      + '若畫面變得模糊，按「停止」再重新開啟相機即可重新對焦。');
+  } catch {
+    showNote('lockNote', 'info', '嘗試鎖定相機參數失敗，仍可正常接收。');
+  }
+}
+
+function stopCamera() {
+  S.scanning = false;
+  cancelAnimationFrame(S.rafId);
+  if (S.stream) { S.stream.getTracks().forEach((t) => t.stop()); S.stream = null; }
+  S.track = null;
+  $('video').srcObject = null;
+  $('camIdle').classList.remove('hidden');
+  $('btnStart').disabled = false; $('btnStop').disabled = true;
+  clearOverlay();
+}
+
+/* =====================================================================
+ * 擷取迴圈
+ * ===================================================================== */
+function scheduleScan() {
+  if (!S.scanning) return;
+  const v = $('video');
+  if (v.requestVideoFrameCallback) v.requestVideoFrameCallback(() => grabFrame());
+  else S.rafId = requestAnimationFrame(() => grabFrame());
+}
+
+async function grabFrame() {
+  if (!S.scanning) return;
+  const video = $('video');
+  if (video.readyState < 2) { scheduleScan(); return; }
+
+  const now = performance.now();
+  S.grabWindow.push(now);
+  while (S.grabWindow.length && now - S.grabWindow[0] > 1000) S.grabWindow.shift();
+  $('sGrab').textContent = S.grabWindow.length;
+
+  const slot = S.pool.find((s) => !s.busy);
+  if (slot) {
+    slot.busy = true;
+    try {
+      const bitmap = await createImageBitmap(video);
+      slot.worker.postMessage({
+        bitmap, jobId: ++S.jobId,
+        redundancy: S.redundancy,
+        threshold: S.threshold,
+        hint: S.hint,
+        // 還沒鎖定尺寸時給大一點的預算讓它搜尋；鎖定後只需小預算，
+        // 這樣品質不佳的幀會很快被放棄，把時間留給下一幀
+        budget: S.hint ? 20 : 200,
+      }, [bitmap]);
+    } catch { slot.busy = false; }
+  }
+  // worker 全忙就直接丟棄這一幀，不排隊
+  scheduleScan();
+}
+
+/* =====================================================================
+ * 解碼結果
+ * ===================================================================== */
+function onResult(m) {
+  if (S.finished) return;
+  S.totalFrames++;
+  if (m.ms != null) { S.lastMs = m.ms; $('sMs').textContent = `${m.ms.toFixed(0)} ms`; }
+
+  if (!m.ok) {
+    S.failedFrames++;
+    // 沒解開但看到四個定位標記 → 代表已經對準了，只是品質不夠。
+    // 要求「滿四個」是有原因的：畫面裡的雜訊或其他圖案偶爾會湊出一兩個
+    // 假的定位標記候選，若不設限，對著空白牆壁也會觸發相機鎖定，
+    // 把對焦距離鎖在錯誤的地方。
+    if (m.finders && m.finders.length >= 4 && S.lockState === 'searching') noteFinderSeen();
+    drawOverlay(null, null, m.finders);
+    updateStats();
+    return;
+  }
+
+  noteFinderSeen();
+  S.hint = { cols: m.header.cols, rows: m.header.rows,
+             sectorsX: m.header.sectorsX, sectorsY: m.header.sectorsY };
+  S.quads = m.quads; S.quadFlags = m.sectorOkFlags;
+  S.lastEra = m.erasureRate;
+  S.lastRms = m.rms;
+  drawOverlay(m.quads, m.sectorOkFlags, null);
+
+  // session 判斷
+  if (S.sessionId === null) S.sessionId = m.header.sessionId;
+  else if (m.header.sessionId !== S.sessionId) {
+    if (m.header.sessionId === S.ignoredSession) { updateStats(); return; }
+    if (!S.pendingSession) askNewSession(m.header);
+    updateStats();
+    return;
+  }
+
+  S.validFrames++;
+  const now = performance.now();
+  S.rateWindow.push(now);
+  while (S.rateWindow.length && now - S.rateWindow[0] > 3000) S.rateWindow.shift();
+
+  // 分區逐一處理
+  let bytes = 0;
+  for (let i = 0; i < m.sectors.length; i++) {
+    S.sectorTried++;
+    const buf = m.sectors[i];
+    if (!buf) { S.sectorFailed++; continue; }
+    const payload = new Uint8Array(buf);
+    bytes += payload.length;
+    handleSectorPayload(payload);
+  }
+  S.byteWindow.push({ t: now, n: bytes });
+  while (S.byteWindow.length && now - S.byteWindow[0].t > 3000) S.byteWindow.shift();
+
+  updateStats();
+  checkDone();
+}
+
+/** 只在第一次穩定看到碼之後才鎖定相機（見 lockCamera 的說明） */
+function noteFinderSeen() {
+  if (S.lockState === 'searching') {
+    if (!S.firstSeenAt) S.firstSeenAt = performance.now();
+    else if (performance.now() - S.firstSeenAt > 1000) {
+      S.lockState = 'locking';
+      lockCamera().finally(() => { S.lockState = 'locked'; });
+    }
+  }
+}
+
+/**
+ * 一個分區的酬載可能是 metadata（JSON），也可能是噴泉碼封包。
+ * 兩者用「是不是合法的 v2 封包」來區分 —— metadata 沒有 magic 與 CRC，
+ * 一定不會被誤判成封包。
+ */
+function handleSectorPayload(payload) {
+  const pkt = decodePacketV2(payload);
+  if (pkt) {
+    if (!S.decoder) {
+      // 還不知道 blockSize / 檔案大小，先暫存
+      if (S.pendingPackets.length < 5000) S.pendingPackets.push(pkt);
+      startDecoderIfReady();
+      return;
+    }
+    if (pkt.sessionId !== S.decoder.sessionId) return;
+    S.decoder.addPacket(pkt);
+    return;
+  }
+
+  // 不是封包 → 試試看是不是 metadata 分塊。
+  // metadata 含整檔 SHA-256，長度遠超過一個分區，所以是切成數塊送來的，
+  // 要湊齊才拼得回完整 JSON。
+  if (S.metadata) return;
+  const whole = S.metaAsm.add(payload);
+  if (!whole) return;
+  try {
+    const meta = JSON.parse(new TextDecoder().decode(whole));
+    if (!meta || typeof meta.size !== 'number' || typeof meta.blockSize !== 'number') return;
+    S.metadata = meta;
+    updateMeta();
+
+    if (S.calibrating && typeof meta.name === 'string' && meta.name.startsWith('CAL|')) {
+      recordCalibration(meta.name);
+      return;
+    }
+
+    startDecoderIfReady();
+  } catch { /* 不是 JSON 就忽略 */ }
+}
+
+/**
+ * 湊齊「metadata（blockSize / 檔案大小）」與「至少一個封包（K / sessionId）」
+ * 就開解碼器，並把暫存的封包全部補進去。
+ *
+ * 這個檢查必須在兩邊都做。原本只在 metadata 抵達時檢查一次，
+ * 而發送端的第 0 幀正好是「分區 0 放 metadata、其餘分區放封包」，
+ * 接收端又依分區編號依序處理 —— metadata 永遠排在封包前面，
+ * 檢查時暫存區還是空的，解碼器於是永遠不會被建立，
+ * 之後所有封包都只是無止盡地堆進暫存區。
+ * 症狀很隱蔽：每一幀都解得開、分區成功率 100%、進度卻永遠是 0%。
+ */
+function startDecoderIfReady() {
+  if (S.decoder || !S.metadata || !S.pendingPackets.length) return;
+  const first = S.pendingPackets[0];
+  S.decoder = new LTDecoder2({
+    sessionId: first.sessionId, K: first.K,
+    blockSize: S.metadata.blockSize, fileSize: S.metadata.size,
+  });
+  for (const p of S.pendingPackets) {
+    if (p.sessionId === S.decoder.sessionId) S.decoder.addPacket(p);
+  }
+  S.pendingPackets.length = 0;
+}
+
+function checkDone() {
+  if (S.decoder && S.decoder.isComplete && S.metadata) finish();
+}
+
+/* =====================================================================
+ * 疊圖
+ * ===================================================================== */
+const overlay = $('overlay');
+const octx = overlay.getContext('2d');
+const clearOverlay = () => octx.clearRect(0, 0, overlay.width, overlay.height);
+
+function drawOverlay(quads, flags, finders) {
+  const video = $('video');
+  const vw = video.videoWidth, vh = video.videoHeight;
+  if (!vw || !vh) return;
+  const rect = video.getBoundingClientRect();
+  if (overlay.width !== rect.width || overlay.height !== rect.height) {
+    overlay.width = rect.width; overlay.height = rect.height;
+  }
+  octx.clearRect(0, 0, overlay.width, overlay.height);
+
+  // video 用 object-fit: cover，要用較大的縮放比並置中裁切
+  const scale = Math.max(overlay.width / vw, overlay.height / vh);
+  const offX = (overlay.width - vw * scale) / 2;
+  const offY = (overlay.height - vh * scale) / 2;
+  const TX = (x) => x * scale + offX, TY = (y) => y * scale + offY;
+
+  if (finders) {
+    octx.strokeStyle = '#ffbe4d'; octx.lineWidth = 2;
+    for (const [x, y] of finders) {
+      octx.beginPath(); octx.arc(TX(x), TY(y), 10, 0, 7); octx.stroke();
+    }
+    return;
+  }
+  if (!quads) return;
+
+  octx.lineWidth = 2;
+  quads.forEach((q, i) => {
+    octx.strokeStyle = flags[i] ? '#3ddc97' : '#ff6b6b';   // 綠=CRC 通過、紅=分區失敗
+    octx.beginPath();
+    octx.moveTo(TX(q[0][0]), TY(q[0][1]));
+    for (let k = 1; k < 4; k++) octx.lineTo(TX(q[k][0]), TY(q[k][1]));
+    octx.closePath(); octx.stroke();
+  });
+}
+
+/* =====================================================================
+ * 統計與建議
+ * ===================================================================== */
+function updateStats() {
+  if (S.decoder) {
+    const pct = S.decoder.progress * 100;
+    $('pBar').style.width = `${pct.toFixed(1)}%`;
+    $('pPct').textContent = `${pct.toFixed(1)}%`;
+    $('pLabel').textContent = `已解出 ${S.decoder.solvedCount} / ${S.decoder.K} 個區塊`;
+  } else if (S.pendingPackets.length) {
+    $('pLabel').textContent = `已暫存 ${S.pendingPackets.length} 個區塊，等待 metadata…`;
+  }
+
+  const fps = S.rateWindow.length / 3;
+  $('sFps').textContent = fps.toFixed(1);
+  const bytes = S.byteWindow.reduce((a, b) => a + b.n, 0);
+  $('sKbps').textContent = (bytes / 3 / 1024).toFixed(1);
+
+  if (S.lastEra != null) {
+    $('sEra').textContent = `${(S.lastEra * 100).toFixed(1)}%`;
+    // 抹除比例是「格子錯誤率」最直接的代理指標：
+    // 真正的格子錯誤率要有原始資料才算得出來，接收端沒有，
+    // 但低信心格的比例和錯誤率高度相關，可以拿來給使用者判斷。
+    $('sCell').textContent = `~${(S.lastEra * 100).toFixed(1)}%`;
+    $('sCell').parentElement.classList.toggle('bad', S.lastEra > 0.05);
+  }
+  const secFail = S.sectorTried ? S.sectorFailed / S.sectorTried : 0;
+  $('sSecFail').textContent = `${(secFail * 100).toFixed(0)}%`;
+  $('sSecFail').parentElement.classList.toggle('bad', secFail > 0.3);
+
+  if (S.decoder && fps > 0.2) {
+    const perFrame = S.byteWindow.length ? bytes / S.byteWindow.length : 0;
+    const remain = Math.max(0, Math.ceil(S.decoder.K * 1.05) - S.decoder.stats.accepted);
+    const blocksPerSec = fps * (perFrame / Math.max(1, S.decoder.blockSize));
+    $('sEta').textContent = blocksPerSec > 0.1 ? fmtDur(remain / blocksPerSec) : '—';
+  }
+
+  giveAdvice(secFail);
+}
+
+/** 錯誤率偏高時給出具體、可執行的建議 */
+function giveAdvice(secFail) {
+  if (S.totalFrames < 20) return;
+  const failFrames = S.failedFrames / S.totalFrames;
+  const tips = [];
+
+  if (failFrames > 0.7 && S.validFrames === 0) {
+    tips.push('完全解不開任何一幀：先確認整片矩陣都在畫面內，四個角的定位標記都拍得到。');
+  }
+  if (S.lastEra != null && S.lastEra > 0.08) {
+    tips.push('低信心格子太多 —— 發送端請<b>改用 C4</b> 或<b>加大格子</b>。');
+  }
+  if (secFail > 0.3) {
+    tips.push('分區失敗率偏高 —— 發送端請<b>降低 FPS</b> 或<b>提高 RS 冗餘</b>。');
+  }
+  if (S.lastRms > 0 && S.hint && S.lastRms > 3) {
+    tips.push('幾何殘差偏大，可能是拍攝角度太斜 —— 請盡量正對螢幕。');
+  }
+  if (failFrames > 0.5 && S.validFrames > 0) {
+    tips.push('約半數影格解不開，常見原因是<b>螢幕反光</b>或<b>手震</b> —— 請調整角度避開反光，或把手機靠在固定物上。');
+  }
+
+  if (!tips.length) { showNote('advice', 'warn', ''); S.adviceShownAt = 0; return; }
+  if (!S.adviceShownAt) S.adviceShownAt = performance.now();
+  if (performance.now() - S.adviceShownAt > 2500) {
+    showNote('advice', 'warn', '⚠️ ' + tips.join('<br>'));
+  }
+}
+
+function updateMeta() {
+  if (!S.metadata) return;
+  $('metaBox').classList.remove('hidden');
+  $('mName').textContent = S.metadata.name || '（未提供）';
+  $('mType').textContent = S.metadata.type || '（未提供）';
+  $('mSize').textContent = fmtBytes(S.metadata.size);
+  if (S.hint) $('mCfg').textContent = `${S.hint.cols}×${S.hint.rows} 格 · ${S.hint.sectorsX}×${S.hint.sectorsY} 分區`;
+}
+
+/* =====================================================================
+ * session 切換
+ * ===================================================================== */
+function askNewSession(header) {
+  S.pendingSession = header;
+  const pct = S.decoder ? Math.round(S.decoder.progress * 100) : 0;
+  showNote('sessionAsk', 'warn',
+    `偵測到<b>新的傳輸階段</b>（sessionId ${header.sessionId.toString(16)}）。目前這份已收到 ${pct}%，要改收新的嗎？`
+    + `<div class="buttons">
+         <button class="btn small primary" id="askYes">改收新的</button>
+         <button class="btn small" id="askNo">繼續收目前這份</button>
+       </div>`);
+  $('askYes').onclick = () => { const h = S.pendingSession; resetReception(); S.sessionId = h.sessionId; };
+  $('askNo').onclick = () => {
+    S.ignoredSession = header.sessionId; S.pendingSession = null;
+    showNote('sessionAsk', 'warn', '');
+  };
+}
+
+/* =====================================================================
+ * 校準分析
+ * ===================================================================== */
+function recordCalibration(name) {
+  // 檔名格式：CAL|階數|C8|10px|10fps
+  const parts = name.split('|');
+  if (parts.length < 5) return;
+  const key = parts.slice(2).join(' · ');
+  const cur = S.calStats.get(key) || { frames: 0, era: 0, secFail: 0, samples: 0 };
+  cur.frames++;
+  if (S.lastEra != null) { cur.era += S.lastEra; cur.samples++; }
+  const secFail = S.sectorTried ? S.sectorFailed / S.sectorTried : 0;
+  cur.secFail = secFail;
+  S.calStats.set(key, cur);
+  renderCalibration();
+}
+
+function renderCalibration() {
+  const rows = [...S.calStats.entries()];
+  if (!rows.length) return;
+  $('calTable').innerHTML = `<table>
+    <tr><th>設定</th><th>成功幀數</th><th>平均抹除率</th></tr>
+    ${rows.map(([k, v]) => `<tr><td>${k}</td><td>${v.frames}</td>
+      <td>${v.samples ? (v.era / v.samples * 100).toFixed(1) + '%' : '—'}</td></tr>`).join('')}
+  </table>`;
+
+  // 建議：在「有成功解出幀」的設定裡，挑資訊密度最高的那一個
+  const good = rows.filter(([, v]) => v.frames >= 3 && (!v.samples || v.era / v.samples < 0.05));
+  if (good.length) {
+    const score = (k) => {
+      const m = k.match(/C(\d+) · (\d+)px · (\d+)fps/);
+      if (!m) return 0;
+      const bits = m[1] === '8' ? 3 : 2;
+      return bits / (Number(m[2]) ** 2) * Number(m[3]);   // 每秒每像素能載多少 bit
+    };
+    const best = good.sort((a, b) => score(b[0]) - score(a[0]))[0];
+    $('calVerdict').innerHTML =
+      `<div class="note ok">✅ <b>建議發送端使用：${best[0]}</b><br>`
+      + `這是所有穩定解出的設定裡資訊密度最高的一組。</div>`;
+  } else {
+    $('calVerdict').innerHTML = `<div class="note warn">目前還沒有任何設定穩定解出，請確認拍攝距離與角度。</div>`;
+  }
+}
+
+/* =====================================================================
+ * 完成
+ * ===================================================================== */
+function finish() {
+  S.finished = true;
+  const file = S.decoder.getFile();
+  const meta = S.metadata;
+  const actual = sha256Hex(file);
+  const ok = actual === meta.sha256;
+
+  const type = meta.type || 'application/octet-stream';
+  const blob = new Blob([file.slice()], { type });
+  if (S.objectUrl) URL.revokeObjectURL(S.objectUrl);
+  S.objectUrl = URL.createObjectURL(blob);
+
+  $('resultCard').classList.remove('hidden');
+  const overhead = ((S.decoder.stats.accepted / S.decoder.K - 1) * 100).toFixed(0);
+  showNote('resultNote', ok ? 'ok' : 'err', ok
+    ? `✅ 接收完成，SHA-256 驗證通過。<br>共 ${S.validFrames} 個有效幀，`
+      + `解出 ${S.decoder.K} 個區塊（噴泉碼開銷 +${overhead}%，`
+      + `分區失敗率 ${(S.sectorFailed / Math.max(1, S.sectorTried) * 100).toFixed(0)}%）。`
+    : `⚠️ SHA-256 <b>不相符</b>。預期 <code>${meta.sha256.slice(0, 16)}…</code>，`
+      + `實際 <code>${actual.slice(0, 16)}…</code><br>下方仍可下載（未經驗證）。`);
+
+  const preview = $('preview');
+  preview.innerHTML = '';
+  if (type.startsWith('image/')) {
+    const img = document.createElement('img'); img.src = S.objectUrl; preview.appendChild(img);
+  } else if (type.startsWith('video/')) {
+    const v = document.createElement('video');
+    v.src = S.objectUrl; v.controls = true; v.playsInline = true; preview.appendChild(v);
+  } else {
+    preview.innerHTML = `<span class="badge">${type} — 沒有內建預覽，請直接下載</span>`;
+  }
+  const a = $('btnDownload');
+  a.href = S.objectUrl; a.download = meta.name || 'received.bin';
+  stopCamera();
+}
+
+/* =====================================================================
+ * 重置
+ * ===================================================================== */
+function resetReception() {
+  S.decoder = null; S.pendingPackets = []; S.metadata = null; S.metaAsm = new MetaAssembler();
+  S.sessionId = null; S.ignoredSession = null; S.pendingSession = null;
+  S.validFrames = 0; S.totalFrames = 0; S.failedFrames = 0;
+  S.sectorTried = 0; S.sectorFailed = 0;
+  S.rateWindow = []; S.byteWindow = []; S.finished = false;
+  S.lastCellErr = null; S.lastEra = null; S.adviceShownAt = 0;
+  if (S.objectUrl) { URL.revokeObjectURL(S.objectUrl); S.objectUrl = null; }
+
+  $('resultCard').classList.add('hidden');
+  $('preview').innerHTML = '';
+  $('metaBox').classList.add('hidden');
+  $('pBar').style.width = '0%'; $('pPct').textContent = '0%';
+  $('pLabel').textContent = '等待第一幀…';
+  for (const [id, v] of [['sFps','0'],['sKbps','0'],['sCell','—'],['sEra','—'],['sSecFail','—'],['sEta','—']]) $(id).textContent = v;
+  showNote('sessionAsk', 'warn', ''); showNote('advice', 'warn', '');
+  clearOverlay();
+}
+
+/* =====================================================================
+ * 事件
+ * ===================================================================== */
+$('btnStart').addEventListener('click', startCamera);
+$('btnStop').addEventListener('click', stopCamera);
+$('btnReset').addEventListener('click', resetReception);
+$('btnAgain').addEventListener('click', () => { resetReception(); startCamera(); });
+$('btnCal').addEventListener('click', () => {
+  S.calibrating = !S.calibrating;
+  $('calCard').classList.toggle('hidden', !S.calibrating);
+  $('btnCal').textContent = S.calibrating ? '結束校準分析' : '校準分析';
+  if (S.calibrating) { S.calStats.clear(); renderCalibration(); }
+});
+
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) S.scanning = false;
+  else if (S.stream && !S.finished) { S.scanning = true; scheduleScan(); }
+});
+
+initPool();
+
+// 供自動化測試注入模擬的解碼結果（不需要真的架相機）
+window.__injectResult = onResult;
+window.__v3recv = S;
+</script>
+</body>
+</html>

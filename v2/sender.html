@@ -1,0 +1,694 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>QR 串流傳檔 v2 — 發送端</title>
+<style>
+  :root {
+    --bg:#0d0f14; --panel:#151922; --panel2:#0f1219; --border:#242a36;
+    --text:#e8ecf3; --muted:#98a2b4; --accent:#5b9dff; --accent2:#7c5cff;
+    --ok:#3ddc97; --warn:#ffbe4d; --danger:#ff6b6b;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); min-height:100vh;
+         font:14px/1.6 system-ui,-apple-system,"Noto Sans TC","Microsoft JhengHei",sans-serif; }
+  .wrap { max-width:1280px; margin:0 auto; padding:22px 16px 48px; }
+  h1 { font-size:20px; margin:0 0 2px; }
+  h1 .tag { font-size:11px; padding:2px 8px; border-radius:999px; vertical-align:middle;
+            background:linear-gradient(90deg,var(--accent),var(--accent2)); color:#fff; margin-left:8px; }
+  .sub { color:var(--muted); font-size:13px; margin:0 0 18px; }
+  .sub a { color:var(--accent); }
+
+  .layout { display:grid; grid-template-columns:360px 1fr; gap:18px; align-items:start; }
+  @media (max-width:920px){ .layout{ grid-template-columns:1fr; } }
+
+  .card { background:var(--panel); border:1px solid var(--border); border-radius:12px; padding:16px; }
+  .card + .card { margin-top:14px; }
+  .card h2 { font-size:12px; text-transform:uppercase; letter-spacing:.07em; color:var(--muted);
+             margin:0 0 12px; font-weight:600; }
+
+  #drop { border:2px dashed var(--border); border-radius:10px; padding:26px 14px; text-align:center;
+          cursor:pointer; transition:border-color .15s, background .15s; }
+  #drop:hover,#drop.over { border-color:var(--accent); background:rgba(91,157,255,.07); }
+  #drop .big{font-size:15px;margin-bottom:3px} #drop .small{color:var(--muted);font-size:12px}
+  #fileInput{display:none}
+
+  /* 預設組合 */
+  .presets { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; }
+  .preset { padding:10px 8px; border-radius:9px; border:1px solid var(--border); background:var(--panel2);
+            color:var(--text); cursor:pointer; text-align:center; }
+  .preset:hover{ border-color:var(--accent); }
+  .preset.on { border-color:var(--accent); background:rgba(91,157,255,.14); }
+  .preset .nm{font-weight:600;font-size:13px} .preset .ds{color:var(--muted);font-size:11px;margin-top:2px}
+
+  .ctl{margin-bottom:14px} .ctl:last-child{margin-bottom:0}
+  .ctl label{display:flex;justify-content:space-between;align-items:baseline;font-size:13px;margin-bottom:5px}
+  .ctl .val{color:var(--accent);font-variant-numeric:tabular-nums;font-weight:600}
+  input[type=range]{width:100%;accent-color:var(--accent)}
+  .hint{color:var(--muted);font-size:11.5px;margin-top:3px}
+
+  .seg{display:flex;gap:6px;flex-wrap:wrap}
+  .seg button{flex:1;min-width:56px;padding:7px 4px;border-radius:8px;border:1px solid var(--border);
+              background:transparent;color:var(--muted);cursor:pointer;font-size:12.5px}
+  .seg button.on{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+
+  .check{display:flex;gap:8px;align-items:flex-start;font-size:13px;cursor:pointer}
+  .check input{margin-top:4px;accent-color:var(--accent)}
+
+  .buttons{display:flex;gap:8px;flex-wrap:wrap}
+  button.btn{padding:10px 16px;border-radius:9px;border:1px solid var(--border);background:var(--panel2);
+             color:var(--text);cursor:pointer;font-size:14px}
+  button.btn:hover:not(:disabled){border-color:var(--accent)}
+  button.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+  button.btn:disabled{opacity:.4;cursor:not-allowed}
+
+  .kv{display:grid;grid-template-columns:auto 1fr;gap:3px 14px;font-size:13px}
+  .kv dt{color:var(--muted)} .kv dd{margin:0;font-variant-numeric:tabular-nums;word-break:break-all}
+
+  .note{border-radius:9px;padding:10px 12px;font-size:12.5px;margin-top:12px}
+  .note.warn{background:rgba(255,190,77,.1);border:1px solid rgba(255,190,77,.35);color:var(--warn)}
+  .note.err{background:rgba(255,107,107,.1);border:1px solid rgba(255,107,107,.35);color:var(--danger)}
+  .note.info{background:rgba(91,157,255,.1);border:1px solid rgba(91,157,255,.32);color:var(--accent)}
+  .hidden{display:none !important}
+
+  #stage{background:#fff;border-radius:10px;display:flex;align-items:center;justify-content:center;
+         min-height:460px;overflow:hidden;position:relative}
+  #stage.idle{background:var(--panel2);border:1px dashed var(--border);color:var(--muted)}
+  #screen{display:block;image-rendering:pixelated}
+  #stage:fullscreen{background:#fff;min-height:100vh;width:100vw;border-radius:0}
+  #calLabel{position:absolute;left:0;right:0;bottom:8px;text-align:center;color:#000;
+            font-size:13px;font-weight:600;background:rgba(255,255,255,.85);padding:4px}
+
+  .statbar{display:flex;gap:16px;flex-wrap:wrap;margin-top:12px;font-size:12.5px;color:var(--muted);
+           font-variant-numeric:tabular-nums}
+  .statbar b{color:var(--text);font-weight:600}
+  .badge{display:inline-block;font-size:11px;padding:2px 7px;border-radius:999px;background:var(--panel2);
+         color:var(--muted);border:1px solid var(--border)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>QR 串流傳檔 — 發送端<span class="tag">v2 高速版</span></h1>
+  <p class="sub">
+    一幀多碼 + Base45 英數模式 + inactivation decoding。
+    接收端請開 <a href="receiver.html">v2 的 receiver.html</a>。
+    <a href="../sender.html" style="color:var(--muted)">（v1 在這裡）</a>
+  </p>
+
+  <div class="layout">
+    <!-- ============ 左側 ============ -->
+    <div>
+      <div class="card">
+        <h2>1. 選擇檔案</h2>
+        <div id="drop">
+          <div class="big">拖放檔案到這裡</div>
+          <div class="small">或點擊選擇</div>
+        </div>
+        <input type="file" id="fileInput">
+        <div id="fileInfo" class="hidden" style="margin-top:14px">
+          <dl class="kv">
+            <dt>檔名</dt><dd id="fName">—</dd>
+            <dt>大小</dt><dd id="fSize">—</dd>
+            <dt>區塊數 K</dt><dd id="fBlocks">—</dd>
+            <dt>預估時間</dt><dd id="fEta">—</dd>
+            <dt>理論吞吐</dt><dd id="fRate">—</dd>
+          </dl>
+        </div>
+        <label class="check hidden" id="cmpRow" style="margin-top:14px">
+          <input type="checkbox" id="cmpOpt">
+          <span>傳送前先壓縮圖片
+            <div class="hint">縮小尺寸並重新編碼，大幅縮短傳輸時間</div>
+          </span>
+        </label>
+        <div id="cmpCtls" class="hidden" style="margin-top:10px">
+          <div class="ctl">
+            <label>格式</label>
+            <div class="seg" id="fmtSeg">
+              <button data-fmt="image/webp" class="on">WebP（更小）</button>
+              <button data-fmt="image/jpeg">JPEG（相容性高）</button>
+            </div>
+          </div>
+          <div class="ctl">
+            <label>最長邊 <span class="val" id="dimVal">1280 px</span></label>
+            <input type="range" id="dimR" min="320" max="2560" step="80" value="1280">
+          </div>
+          <div class="ctl">
+            <label>品質 <span class="val" id="qVal">0.75</span></label>
+            <input type="range" id="qR" min="0.3" max="0.95" step="0.05" value="0.75">
+          </div>
+        </div>
+        <div id="sizeWarn" class="note warn hidden"></div>
+        <div id="errBox" class="note err hidden"></div>
+      </div>
+
+      <div class="card">
+        <h2>2. 預設組合</h2>
+        <div class="presets" id="presets">
+          <button class="preset" data-preset="stable">
+            <div class="nm">穩定</div><div class="ds">1×1 · v20 · 10fps</div>
+          </button>
+          <button class="preset on" data-preset="fast">
+            <div class="nm">快速</div><div class="ds">2×2 · v15 · 12fps</div>
+          </button>
+          <button class="preset" data-preset="turbo">
+            <div class="nm">極速</div><div class="ds">3×3 · v15 · 15fps</div>
+          </button>
+        </div>
+        <div class="hint" style="margin-top:8px">極速需要大螢幕，而且手機最好固定在支架上</div>
+      </div>
+
+      <div class="card">
+        <h2>3. 進階設定</h2>
+        <div class="ctl">
+          <label>網格（一幀幾個碼）</label>
+          <div class="seg" id="gridSeg">
+            <button data-grid="1x1">1×1</button>
+            <button data-grid="2x2" class="on">2×2</button>
+            <button data-grid="3x2">3×2</button>
+            <button data-grid="3x3">3×3</button>
+          </div>
+        </div>
+        <div class="ctl">
+          <label>QR 版本 <span class="val" id="verVal">15</span></label>
+          <input type="range" id="verR" min="10" max="30" step="1" value="15">
+          <div class="hint" id="verHint">區塊大小依版本自動計算</div>
+        </div>
+        <div class="ctl">
+          <label>幀率 FPS <span class="val" id="fpsVal">12</span></label>
+          <input type="range" id="fpsR" min="5" max="30" step="1" value="12">
+          <div class="hint" id="fpsHint">實際幀率會對齊螢幕更新率</div>
+        </div>
+        <div class="ctl">
+          <label>糾錯等級</label>
+          <div class="seg" id="eccSeg">
+            <button data-ecc="L" class="on">L（7%）</button>
+            <button data-ecc="M">M（15%）</button>
+          </div>
+        </div>
+        <label class="check" style="margin-top:4px">
+          <input type="checkbox" id="sysOpt" checked>
+          <span>系統區塊優先
+            <div class="hint">
+              前 K 幀直接送原始區塊。訊號完美時第一輪就收完；
+              但只要有漏幀，實測反而比全程隨機編碼慢（1.27～1.35× vs 1.01×）——
+              因為 v2 的解碼器已經讓隨機區塊接近最佳。<b>環境不理想時建議關掉。</b>
+            </div>
+          </span>
+        </label>
+        <label class="check" style="margin-top:4px">
+          <input type="checkbox" id="rgbOpt">
+          <span>RGB 三通道模式 <span class="badge">實驗性</span>
+            <div class="hint">
+              三個碼分別放進 R/G/B 通道，理論上 3 倍吞吐。
+              手機相機普遍會做色度次取樣，很可能整片解不出來 —— 失敗率高就關掉它。
+            </div>
+          </span>
+        </label>
+      </div>
+    </div>
+
+    <!-- ============ 右側 ============ -->
+    <div>
+      <div class="card">
+        <div class="buttons">
+          <button class="btn primary" id="btnStart" disabled>開始播放</button>
+          <button class="btn" id="btnPause" disabled>暫停</button>
+          <button class="btn" id="btnFull" disabled>全螢幕</button>
+          <button class="btn" id="btnCal">校準模式</button>
+        </div>
+        <div class="statbar">
+          <span>幀 <b id="sFrame">—</b></span>
+          <span>封包 <b id="sPackets">0</b></span>
+          <span>目標 <b id="sTarget">—</b></span>
+          <span>實測 <b id="sFps">—</b></span>
+          <span>緩衝 <b id="sBuf">0</b></span>
+          <span>螢幕 <b id="sHz">量測中…</b></span>
+        </div>
+        <div id="calNote" class="note info hidden"></div>
+      </div>
+
+      <div class="card" style="padding:12px">
+        <div id="stage" class="idle">
+          <span id="stageHint">選好檔案後按「開始播放」</span>
+          <canvas id="screen" class="hidden"></canvas>
+          <div id="calLabel" class="hidden"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script type="module">
+import { sha256Hex, blockSizeForVersion, METADATA_EVERY } from './fountain2.js';
+import qrcode from './vendor/qrcode-generator-1.4.4.mjs';
+
+const $ = (id) => document.getElementById(id);
+
+/* =====================================================================
+ * 狀態（全部在記憶體，不使用 localStorage）
+ * ===================================================================== */
+const S = {
+  file: null, payload: null, payloadName: '', payloadType: '', sha: '',
+  cols: 2, rows: 2, version: 15, fps: 12, ecc: 'L', rgb: false, systematic: true, fmt: 'image/webp',
+
+  worker: null, ready: null,
+  queue: [],            // 已經做好、等著顯示的畫面
+  requested: 0,         // 已經跟 worker 要了幾幀（避免重複要）
+  nextFrameNo: 0,
+
+  playing: false, rafId: 0,
+  refreshHz: 60, holdFrames: 5, tick: 0,
+  frameShown: 0, packetsSent: 0,
+  fpsWindow: [],
+  calibrating: false, calStep: 0, calTimer: 0,
+};
+
+const TARGET_BUFFER = 60;   // 需求指定：預先產生 60 幀
+const REFILL_AT = 24;       // 緩衝低於這個數量就再跟 worker 要
+
+const fmtBytes = (n) => n < 1024 ? `${n} B`
+  : n < 1048576 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1048576).toFixed(2)} MB`;
+const fmtDur = (s) => !isFinite(s) ? '—' : s < 60 ? `${Math.ceil(s)} 秒`
+  : `${Math.floor(s / 60)} 分 ${Math.round(s % 60)} 秒`;
+
+function showErr(msg) {
+  const b = $('errBox');
+  if (!msg) { b.classList.add('hidden'); return; }
+  b.textContent = msg; b.classList.remove('hidden');
+}
+
+/* =====================================================================
+ * 量測螢幕更新率
+ * =====================================================================
+ * 之所以要知道更新率：v2 的節奏是「每張圖固定顯示 N 個刷新週期」，
+ * 而不是「每隔 X 毫秒換一張」。用時間換圖會讓某些幀剛好跨越兩次刷新、
+ * 某些幀只顯示一次，造成畫面長短不一，相機就更容易拍到撕裂的畫面。
+ * 對齊刷新週期之後每張圖的曝光時間完全一致，掃描成功率明顯較穩。
+ */
+async function measureRefreshRate() {
+  const samples = [];
+  let last = 0;
+  await new Promise((resolve) => {
+    let n = 0;
+    const step = (t) => {
+      if (last) samples.push(t - last);
+      last = t;
+      if (++n < 40) requestAnimationFrame(step); else resolve();
+    };
+    requestAnimationFrame(step);
+  });
+  samples.sort((a, b) => a - b);
+  const median = samples[samples.length >> 1] || 16.7;
+  S.refreshHz = Math.round(1000 / median);
+  // 常見的更新率就那幾種，吸附過去避免量測誤差
+  const common = [60, 75, 90, 120, 144, 165, 240];
+  const near = common.find((h) => Math.abs(h - S.refreshHz) <= 4);
+  if (near) S.refreshHz = near;
+  $('sHz').textContent = `${S.refreshHz} Hz`;
+  updateTiming();
+}
+
+/** 依目標 FPS 算出每張圖要停留幾個刷新週期 */
+function updateTiming() {
+  S.holdFrames = Math.max(1, Math.round(S.refreshHz / S.fps));
+  const actual = S.refreshHz / S.holdFrames;
+  $('sTarget').textContent = `${actual.toFixed(1)} FPS`;
+  $('fpsHint').textContent =
+    `每張圖停留 ${S.holdFrames} 個刷新週期 → 實際 ${actual.toFixed(1)} FPS（螢幕 ${S.refreshHz} Hz）`;
+  return actual;
+}
+
+/* =====================================================================
+ * 設定與估算
+ * ===================================================================== */
+const PRESETS = {
+  stable: { cols: 1, rows: 1, version: 20, fps: 10, ecc: 'L', rgb: false },
+  fast:   { cols: 2, rows: 2, version: 15, fps: 12, ecc: 'L', rgb: false },
+  turbo:  { cols: 3, rows: 3, version: 15, fps: 15, ecc: 'L', rgb: false },
+};
+
+function applyPreset(name) {
+  const p = PRESETS[name];
+  Object.assign(S, p);
+  $('verR').value = p.version; $('verVal').textContent = p.version;
+  $('fpsR').value = p.fps; $('fpsVal').textContent = p.fps;
+  $('rgbOpt').checked = p.rgb;
+  setSeg('gridSeg', 'grid', `${p.cols}x${p.rows}`);
+  setSeg('eccSeg', 'ecc', p.ecc);
+  [...$('presets').children].forEach((b) => b.classList.toggle('on', b.dataset.preset === name));
+  updateTiming(); updateEstimate();
+}
+
+function setSeg(segId, key, value) {
+  [...$(segId).children].forEach((b) => b.classList.toggle('on', b.dataset[key] === value));
+}
+
+/** 目前設定下，一幀能送出多少「有效位元組」 */
+function currentSizing() {
+  const sizing = blockSizeForVersion(qrcode, S.version, S.ecc);
+  const codes = S.cols * S.rows * (S.rgb ? 3 : 1);
+  return { ...sizing, codes };
+}
+
+function updateEstimate() {
+  const { blockSize, chars, codes } = currentSizing();
+  $('verHint').textContent =
+    `v${S.version}/${S.ecc}：每個碼 ${chars} 個英數字元 → 區塊 ${blockSize} bytes，一幀 ${codes} 個碼`;
+
+  if (!S.payload) return;
+  const K = Math.max(1, Math.ceil(S.payload.length / blockSize));
+  const actualFps = S.refreshHz / S.holdFrames;
+  // 一幀送 codes 個封包；每 15 個資料幀多一個 metadata 幀；解碼開銷約 1.05
+  const packetsNeeded = K * 1.05 * (METADATA_EVERY + 1) / METADATA_EVERY;
+  const seconds = packetsNeeded / (codes * actualFps);
+
+  $('fBlocks').textContent = `${K} 塊 × ${blockSize} B`;
+  $('fEta').textContent = `約 ${fmtDur(seconds)}`;
+  $('fRate').textContent = `${(blockSize * codes * actualFps / 1024).toFixed(1)} KB/s`;
+}
+
+/* =====================================================================
+ * 檔案處理
+ * ===================================================================== */
+async function handleFile(file) {
+  showErr('');
+  S.file = file;
+  $('fileInfo').classList.remove('hidden');
+  $('fName').textContent = file.name;
+  const isImage = file.type.startsWith('image/');
+  $('cmpRow').classList.toggle('hidden', !isImage);
+  if (!isImage) $('cmpOpt').checked = false;
+  $('cmpCtls').classList.toggle('hidden', !(isImage && $('cmpOpt').checked));
+  await preparePayload();
+}
+
+async function preparePayload() {
+  if (!S.file) return;
+  $('fSize').textContent = '處理中…';
+  $('btnStart').disabled = true;
+  const useCmp = $('cmpOpt').checked && S.file.type.startsWith('image/');
+
+  try {
+    if (useCmp) {
+      const r = await compressImage(S.file, S.fmt, Number($('dimR').value), Number($('qR').value));
+      S.payload = r.bytes; S.payloadName = r.name; S.payloadType = S.fmt;
+    } else {
+      S.payload = new Uint8Array(await S.file.arrayBuffer());
+      S.payloadName = S.file.name;
+      S.payloadType = S.file.type || 'application/octet-stream';
+    }
+    S.sha = sha256Hex(S.payload);
+  } catch (e) {
+    showErr('讀取或壓縮失敗：' + e.message);
+    return;
+  }
+
+  const n = S.payload.length, orig = S.file.size;
+  $('fSize').textContent = useCmp
+    ? `${fmtBytes(n)}（原檔 ${fmtBytes(orig)}，壓到 ${(n / orig * 100).toFixed(0)}%）`
+    : fmtBytes(n);
+
+  const warn = $('sizeWarn');
+  if (S.file.type.startsWith('video/') && n > 10 * 1024 * 1024) {
+    warn.classList.remove('hidden');
+    warn.innerHTML = `⚠️ 影片 ${fmtBytes(n)} 超過 10 MB，用 QR 傳會非常久。`
+      + `建議先壓到 720p 以下、降低位元率再傳。`;
+  } else if (n > 10 * 1024 * 1024) {
+    warn.classList.remove('hidden');
+    warn.innerHTML = `⚠️ 檔案 ${fmtBytes(n)} 偏大，請留意預估時間。`;
+  } else warn.classList.add('hidden');
+
+  updateEstimate();
+  $('btnStart').disabled = false;
+  $('btnFull').disabled = false;
+}
+
+/** 縮圖並重新編碼成 WebP 或 JPEG */
+async function compressImage(file, mime, maxDim, quality) {
+  const bmp = await createImageBitmap(file);
+  const scale = Math.min(1, maxDim / Math.max(bmp.width, bmp.height));
+  const w = Math.max(1, Math.round(bmp.width * scale));
+  const h = Math.max(1, Math.round(bmp.height * scale));
+  const cv = document.createElement('canvas');
+  cv.width = w; cv.height = h;
+  cv.getContext('2d').drawImage(bmp, 0, 0, w, h);
+  bmp.close();
+  let blob = await new Promise((r) => cv.toBlob(r, mime, quality));
+  // 有些瀏覽器不支援 WebP 輸出，會默默回傳 PNG，這時退回 JPEG
+  if (!blob || (mime === 'image/webp' && blob.type !== 'image/webp')) {
+    blob = await new Promise((r) => cv.toBlob(r, 'image/jpeg', quality));
+    if (blob) S.payloadType = 'image/jpeg';
+  }
+  if (!blob) throw new Error('瀏覽器無法輸出壓縮後的圖片');
+  const ext = (blob.type === 'image/webp') ? '.webp' : '.jpg';
+  return { bytes: new Uint8Array(await blob.arrayBuffer()), name: file.name.replace(/\.[^.]+$/, '') + ext };
+}
+
+/* =====================================================================
+ * Worker：預先產生畫面
+ * ===================================================================== */
+function startWorker(data, meta) {
+  return new Promise((resolve, reject) => {
+    if (S.worker) S.worker.terminate();
+    // module 型態的 worker，才能在裡面 import fountain2.js
+    S.worker = new Worker(new URL('./encoder-worker.js', import.meta.url), { type: 'module' });
+    S.queue = []; S.requested = 0; S.nextFrameNo = 0;
+
+    S.worker.onmessage = (e) => {
+      const m = e.data;
+      if (m.type === 'ready') { S.ready = m; resolve(m); return; }
+      if (m.type === 'frames') {
+        for (const f of m.frames) S.queue.push(f);
+        S.requested -= m.frames.length;
+        $('sBuf').textContent = S.queue.length;
+      }
+    };
+    S.worker.onerror = (err) => reject(new Error(err.message || 'worker 發生錯誤'));
+
+    S.worker.postMessage({
+      type: 'init',
+      data,
+      metadata: meta,
+      sessionId: (Math.random() * 65536) & 0xffff,
+      config: { cols: S.cols, rows: S.rows, version: S.version, ecc: S.ecc,
+                rgb: S.rgb, systematic: S.systematic },
+    });
+  });
+}
+
+/** 緩衝不足時再跟 worker 要一批畫面 */
+function topUpBuffer() {
+  const want = TARGET_BUFFER - S.queue.length - S.requested;
+  if (want <= 0) return;
+  S.worker.postMessage({ type: 'produce', count: want, startFrame: S.nextFrameNo });
+  S.nextFrameNo += want;
+  S.requested += want;
+}
+
+/* =====================================================================
+ * 繪製
+ * ===================================================================== */
+const screen = $('screen');
+const sctx = screen.getContext('2d', { alpha: false });
+
+/**
+ * 把 worker 做好的 ImageBitmap 貼上畫面。
+ * bitmap 是「1 像素 = 1 模組」的原始尺寸，這裡只做整數倍放大 ——
+ * 非整數倍會讓模組邊界落在半個像素上，相機拍起來就糊了。
+ */
+function drawFrame(bitmap) {
+  const stage = $('stage');
+  const rect = stage.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  const availW = Math.max(80, rect.width - 8) * dpr;
+  const availH = Math.max(80, rect.height - 8) * dpr;
+  const scale = Math.max(1, Math.floor(Math.min(availW / bitmap.width, availH / bitmap.height)));
+
+  const w = bitmap.width * scale, h = bitmap.height * scale;
+  if (screen.width !== w || screen.height !== h) { screen.width = w; screen.height = h; }
+  screen.style.width = `${w / dpr}px`;
+  screen.style.height = `${h / dpr}px`;
+
+  sctx.imageSmoothingEnabled = false;    // 關閉插值，維持硬邊
+  sctx.drawImage(bitmap, 0, 0, w, h);
+  bitmap.close();                        // ImageBitmap 用完要釋放，否則記憶體會一直漲
+}
+
+/**
+ * 播放迴圈：以「刷新週期」為單位計時，而不是毫秒。
+ */
+function loop() {
+  if (!S.playing) return;
+  S.rafId = requestAnimationFrame(loop);
+
+  if (++S.tick < S.holdFrames) return;   // 這張圖還沒停留夠久
+  S.tick = 0;
+
+  const frame = S.queue.shift();
+  if (!frame) return;                    // 緩衝空了，這個週期就先維持原畫面
+
+  drawFrame(frame.bitmap);
+  S.frameShown++;
+  S.packetsSent += frame.packetCount;
+  $('sFrame').textContent = frame.frameNo;
+  $('sPackets').textContent = S.packetsSent;
+  $('sBuf').textContent = S.queue.length;
+
+  const now = performance.now();
+  S.fpsWindow.push(now);
+  while (S.fpsWindow.length && now - S.fpsWindow[0] > 1000) S.fpsWindow.shift();
+  $('sFps').textContent = `${S.fpsWindow.length} FPS`;
+
+  if (S.queue.length + S.requested < REFILL_AT) topUpBuffer();
+}
+
+/* =====================================================================
+ * 開始 / 暫停 / 校準
+ * ===================================================================== */
+async function start(payload, meta, label) {
+  showErr('');
+  try {
+    const ready = await startWorker(payload, meta);
+    $('fBlocks').textContent = `${ready.K} 塊 × ${ready.blockSize} B`;
+    $('stage').classList.remove('idle');
+    $('stageHint').classList.add('hidden');
+    screen.classList.remove('hidden');
+    $('calLabel').classList.toggle('hidden', !label);
+    if (label) $('calLabel').textContent = label;
+
+    S.frameShown = 0; S.packetsSent = 0; S.fpsWindow = []; S.tick = 0;
+    topUpBuffer();
+    S.playing = true;
+    $('btnStart').textContent = '重新開始';
+    $('btnPause').disabled = false;
+    $('btnPause').textContent = '暫停';
+    S.rafId = requestAnimationFrame(loop);
+  } catch (e) {
+    showErr('啟動編碼器失敗：' + e.message);
+  }
+}
+
+function startNormal() {
+  stopCalibration();
+  if (!S.payload) return;
+  start(S.payload, { name: S.payloadName, type: S.payloadType, sha256: S.sha });
+}
+
+function pause() { S.playing = false; cancelAnimationFrame(S.rafId); $('btnPause').textContent = '繼續'; }
+function resume() { if (!S.worker) return; S.playing = true; $('btnPause').textContent = '暫停';
+                    S.rafId = requestAnimationFrame(loop); }
+
+/* --- 校準模式 ---------------------------------------------------------
+ * 依序播放密度由低到高的測試畫面，每一階段 6 秒。
+ * 發送端無從得知接收端解得動不動（單向傳輸），所以做法是：
+ * 把目前的設定寫進 metadata 的檔名欄位，接收端就會顯示「現在收到的是哪一階」，
+ * 使用者對照接收端的 CRC 失敗率，就知道自己這組裝置的極限在哪。
+ */
+const CAL_STEPS = [
+  { cols: 1, rows: 1, version: 20, fps: 10 },
+  { cols: 2, rows: 2, version: 15, fps: 10 },
+  { cols: 2, rows: 2, version: 20, fps: 12 },
+  { cols: 3, rows: 2, version: 15, fps: 12 },
+  { cols: 3, rows: 3, version: 15, fps: 15 },
+  { cols: 3, rows: 3, version: 20, fps: 15 },
+];
+
+function startCalibration() {
+  stopCalibration();
+  S.calibrating = true;
+  S.calStep = 0;
+  $('calNote').classList.remove('hidden');
+  $('btnCal').textContent = '結束校準';
+  nextCalStep();
+}
+
+function nextCalStep() {
+  if (!S.calibrating) return;
+  if (S.calStep >= CAL_STEPS.length) { stopCalibration(); return; }
+
+  const step = CAL_STEPS[S.calStep];
+  Object.assign(S, step, { rgb: false });
+  updateTiming();
+
+  const label = `第 ${S.calStep + 1}/${CAL_STEPS.length} 階：${step.cols}×${step.rows} 網格 · QR v${step.version} · ${step.fps} FPS`;
+  $('calNote').innerHTML = `<b>校準模式</b>　${label}<br>`
+    + `請看接收端的「CRC 失敗率」與「有效封包/秒」，`
+    + `失敗率開始飆高的前一階，就是這組螢幕與手機的穩定上限。`;
+
+  // 用固定內容的測試資料，並把設定寫進檔名讓接收端顯示
+  const testData = new Uint8Array(60 * 1024);
+  for (let i = 0; i < testData.length; i++) testData[i] = (i * 31 + S.calStep * 17) & 255;
+  start(testData, {
+    name: `校準 ${step.cols}x${step.rows} v${step.version} ${step.fps}fps`,
+    type: 'application/octet-stream',
+    sha256: sha256Hex(testData),
+  }, label);
+
+  S.calStep++;
+  S.calTimer = setTimeout(nextCalStep, 6000);
+}
+
+function stopCalibration() {
+  if (S.calTimer) clearTimeout(S.calTimer);
+  S.calTimer = 0;
+  if (!S.calibrating) return;
+  S.calibrating = false;
+  S.playing = false;
+  cancelAnimationFrame(S.rafId);
+  $('calNote').classList.add('hidden');
+  $('calLabel').classList.add('hidden');
+  $('btnCal').textContent = '校準模式';
+}
+
+/* =====================================================================
+ * 事件
+ * ===================================================================== */
+$('drop').addEventListener('click', () => $('fileInput').click());
+$('fileInput').addEventListener('change', (e) => e.target.files[0] && handleFile(e.target.files[0]));
+for (const t of ['dragenter', 'dragover']) $('drop').addEventListener(t, (e) => { e.preventDefault(); $('drop').classList.add('over'); });
+for (const t of ['dragleave', 'drop']) $('drop').addEventListener(t, (e) => { e.preventDefault(); $('drop').classList.remove('over'); });
+$('drop').addEventListener('drop', (e) => e.dataTransfer.files[0] && handleFile(e.dataTransfer.files[0]));
+
+$('presets').addEventListener('click', (e) => {
+  const b = e.target.closest('.preset');
+  if (b) applyPreset(b.dataset.preset);
+});
+$('gridSeg').addEventListener('click', (e) => {
+  const b = e.target.closest('button'); if (!b) return;
+  const [c, r] = b.dataset.grid.split('x').map(Number);
+  S.cols = c; S.rows = r;
+  setSeg('gridSeg', 'grid', b.dataset.grid);
+  updateEstimate();
+});
+$('eccSeg').addEventListener('click', (e) => {
+  const b = e.target.closest('button'); if (!b) return;
+  S.ecc = b.dataset.ecc; setSeg('eccSeg', 'ecc', S.ecc); updateEstimate();
+});
+$('fmtSeg').addEventListener('click', (e) => {
+  const b = e.target.closest('button'); if (!b) return;
+  S.fmt = b.dataset.fmt; setSeg('fmtSeg', 'fmt', S.fmt); preparePayload();
+});
+$('verR').addEventListener('input', (e) => { S.version = +e.target.value; $('verVal').textContent = S.version; updateEstimate(); });
+$('fpsR').addEventListener('input', (e) => { S.fps = +e.target.value; $('fpsVal').textContent = S.fps; updateTiming(); updateEstimate(); });
+$('rgbOpt').addEventListener('change', (e) => { S.rgb = e.target.checked; updateEstimate(); });
+$('sysOpt').addEventListener('change', (e) => { S.systematic = e.target.checked; });
+$('cmpOpt').addEventListener('change', () => { $('cmpCtls').classList.toggle('hidden', !$('cmpOpt').checked); preparePayload(); });
+$('dimR').addEventListener('input', (e) => $('dimVal').textContent = `${e.target.value} px`);
+$('qR').addEventListener('input', (e) => $('qVal').textContent = e.target.value);
+$('dimR').addEventListener('change', preparePayload);
+$('qR').addEventListener('change', preparePayload);
+
+$('btnStart').addEventListener('click', startNormal);
+$('btnPause').addEventListener('click', () => S.playing ? pause() : resume());
+$('btnFull').addEventListener('click', () => {
+  if (document.fullscreenElement) document.exitFullscreen();
+  else $('stage').requestFullscreen?.().catch(() => showErr('瀏覽器拒絕進入全螢幕'));
+});
+$('btnCal').addEventListener('click', () => S.calibrating ? stopCalibration() : startCalibration());
+
+measureRefreshRate();
+updateEstimate();
+</script>
+</body>
+</html>

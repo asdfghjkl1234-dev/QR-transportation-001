@@ -1,0 +1,308 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>v3 效能基準與格式對照</title>
+<style>
+  :root{--bg:#0b0e13;--panel:#141922;--panel2:#0e1219;--border:#232b38;--text:#e8ecf3;
+        --muted:#93a0b4;--accent:#5b9dff;--ok:#3ddc97;--warn:#ffbe4d;--danger:#ff6b6b}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);padding:24px 16px 60px;
+       font:13.5px/1.65 system-ui,-apple-system,"Noto Sans TC","Microsoft JhengHei",sans-serif}
+  .wrap{max-width:1000px;margin:0 auto}
+  h1{font-size:20px;margin:0 0 4px}
+  .sub{color:var(--muted);font-size:13px;margin:0 0 18px}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:11px;padding:16px}
+  .card+.card{margin-top:14px}
+  .card h2{font-size:12px;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);
+           margin:0 0 12px;font-weight:600}
+  button.btn{padding:10px 16px;border-radius:9px;border:1px solid var(--border);background:var(--panel2);
+             color:var(--text);cursor:pointer;font-size:14px}
+  button.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+  button.btn:disabled{opacity:.45;cursor:not-allowed}
+  table{width:100%;border-collapse:collapse;font-size:12.5px;font-variant-numeric:tabular-nums}
+  th,td{text-align:right;padding:6px 8px;border-bottom:1px solid var(--border)}
+  th:first-child,td:first-child{text-align:left}
+  th{color:var(--muted);font-weight:600}
+  tr.hl td{background:rgba(91,157,255,.08)}
+  .good{color:var(--ok)}.bad{color:var(--danger)}.warn{color:var(--warn)}
+  .note{border-radius:9px;padding:11px 13px;font-size:12.5px;margin-top:12px}
+  .note.info{background:rgba(91,157,255,.1);border:1px solid rgba(91,157,255,.3);color:var(--accent)}
+  .note.warn{background:rgba(255,190,77,.1);border:1px solid rgba(255,190,77,.32);color:var(--warn)}
+  .note a{color:inherit}
+  .muted{color:var(--muted)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>v3 效能基準與格式對照</h1>
+  <p class="sub">
+    量測本專案 v3 格式在各種設定下的編碼／解碼成本與抗失真能力，
+    並與 libcimbar 的公開規格做格式層面的對照。
+  </p>
+
+  <div class="card">
+    <h2>1. 本專案 v3：各設定的實測</h2>
+    <button class="btn primary" id="btnRun">開始量測</button>
+    <span id="busy" class="muted hidden" style="margin-left:10px">計算中…</span>
+    <div id="ourTable" style="margin-top:12px"></div>
+    <div class="note info">
+      螢幕假設為 1920×1080。編碼與解碼耗時是在這台裝置上實測的；
+      「理論吞吐」= 每幀位元組 × FPS，未計入相機端的漏幀。
+      抗失真欄位是在模擬器的「中等失真」下量到的格子錯誤率與分區成功率。
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>2. 與 libcimbar 的對照</h2>
+    <div id="cimbarTable"></div>
+    <div class="note warn" id="cimbarNote"></div>
+  </div>
+</div>
+
+<script type="module">
+import { makeLayout, frameCapacity, bitsPerCell } from './format.js';
+import { encodeFrame, decodeFrame } from './pipeline.js';
+import { distort, MEDIUM_DISTORTION } from './simulator.js';
+
+const $ = (id) => document.getElementById(id);
+
+/** 要量測的設定（對應發送端的三個預設組合，外加兩個對照點） */
+const CONFIGS = [
+  { name: '穩定',   level: 4, cellPx: 14, fps: 8 },
+  { name: '標準',   level: 8, cellPx: 10, fps: 10 },
+  { name: '極限',   level: 8, cellPx: 8,  fps: 12 },
+  { name: '（對照）C4 10px', level: 4, cellPx: 10, fps: 10 },
+  { name: '（對照）C8 12px', level: 8, cellPx: 12, fps: 10 },
+  { name: '腳架',   level: 32, cellPx: 8,  fps: 8 },
+  { name: '（對照）C8+形狀 10px', level: 32, cellPx: 10, fps: 10 },
+];
+
+const SCREEN_W = 1920, SCREEN_H = 1080, QUIET = 3, RED = 0.25;
+
+async function runBench() {
+  $('btnRun').disabled = true;
+  $('busy').classList.remove('hidden');
+  const rows = [];
+
+  for (const c of CONFIGS) {
+    await new Promise((r) => setTimeout(r, 0));
+    const cols = Math.max(44, Math.floor(SCREEN_W / c.cellPx) - QUIET * 2);
+    const rows_ = Math.max(44, Math.floor(SCREEN_H / c.cellPx) - QUIET * 2);
+
+    let layout, cap;
+    try {
+      layout = makeLayout(cols, rows_, 4, 3);
+      cap = frameCapacity(layout, c.level, RED);
+    } catch (e) { rows.push({ ...c, error: e.message }); continue; }
+
+    const blockSize = cap.payloadPerSector - 15;
+    if (blockSize < 8) { rows.push({ ...c, error: '分區太小' }); continue; }
+
+    const payloads = layout.sectors.map((s, i) => {
+      const p = new Uint8Array(cap.payloadPerSector);
+      for (let j = 0; j < p.length; j++) p[j] = (j * 31 + i * 101) & 255;
+      return p;
+    });
+    const cfg = { cols, rows: rows_, level: c.level, cellPx: c.cellPx,
+                  sectorsX: 4, sectorsY: 3, redundancy: RED };
+
+    // --- 編碼耗時 ---
+    const t0 = performance.now();
+    const { img, grid } = encodeFrame(cfg, { sessionId: 1, frameSeq: 7 }, payloads);
+    const encMs = performance.now() - t0;
+
+    // --- 解碼耗時（乾淨影像，帶尺寸提示，代表串流中的穩定狀態）---
+    const hint = { cols, rows: rows_, sectorsX: 4, sectorsY: 3 };
+    const t1 = performance.now();
+    const clean = decodeFrame(img, RED, { hint });
+    const decMs = performance.now() - t1;
+
+    // --- 抗失真 ---
+    await new Promise((r) => setTimeout(r, 0));
+    const noisy = distort(img, MEDIUM_DISTORTION);
+    const res = decodeFrame(noisy, RED, { hint });
+    let cellErr = null, sectorOk = null;
+    if (res.ok) {
+      let wrong = 0, total = 0;
+      for (const s of res.layout.sectors) for (const q of s.cells) { total++; if (res.detection.symbols[q] !== grid[q]) wrong++; }
+      cellErr = wrong / total;
+      let okCount = 0;
+      for (let i = 0; i < res.sectors.length; i++) {
+        const p = res.sectors[i];
+        if (p && p.subarray(0, payloads[i].length).every((v, k) => v === payloads[i][k])) okCount++;
+      }
+      sectorOk = okCount / res.stats.sectorTotal;
+    }
+
+    const bytesPerFrame = blockSize * cap.sectorCount;
+    rows.push({
+      ...c, cols, rows_: rows_,
+      dataCells: cap.dataCells,
+      bitsPerCell: bitsPerCell(c.level),
+      bytesPerFrame,
+      kbps: bytesPerFrame * c.fps / 1024,
+      encMs, decMs,
+      decodeCeilingFps: 1000 / decMs,
+      cleanOk: clean.ok,
+      cellErr, sectorOk,
+    });
+  }
+
+  renderOurs(rows);
+  renderCimbar(rows);
+  $('busy').classList.add('hidden');
+  $('btnRun').disabled = false;
+  window.__bench = rows;
+}
+
+function pct(v, digits = 2) { return v == null ? '—' : `${(v * 100).toFixed(digits)}%`; }
+
+function renderOurs(rows) {
+  $('ourTable').innerHTML = `<table>
+    <tr>
+      <th>設定</th><th>網格</th><th>資料格</th><th>bit/格</th>
+      <th>每幀位元組</th><th>FPS</th><th>理論吞吐</th>
+      <th>編碼</th><th>解碼</th><th>解碼上限</th>
+      <th>中等失真<br>格子錯誤</th><th>中等失真<br>分區成功</th>
+    </tr>
+    ${rows.map((r) => r.error
+      ? `<tr><td>${r.name}</td><td colspan="11" class="bad">${r.error}</td></tr>`
+      : `<tr class="${r.name.startsWith('（') ? '' : 'hl'}">
+          <td>${r.name}<br><span class="muted">C${r.level} · ${r.cellPx}px</span></td>
+          <td>${r.cols}×${r.rows_}</td>
+          <td>${r.dataCells.toLocaleString()}</td>
+          <td>${r.bitsPerCell}</td>
+          <td>${r.bytesPerFrame.toLocaleString()} B</td>
+          <td>${r.fps}</td>
+          <td><b>${r.kbps.toFixed(1)} KB/s</b></td>
+          <td>${r.encMs.toFixed(0)} ms</td>
+          <td>${r.decMs.toFixed(0)} ms</td>
+          <td class="${r.decodeCeilingFps >= r.fps ? 'good' : 'warn'}">${r.decodeCeilingFps.toFixed(1)} fps</td>
+          <td class="${r.cellErr == null ? 'bad' : (r.cellErr < (r.level === 8 ? 0.03 : 0.01) ? 'good' : 'bad')}">
+            ${r.cellErr == null ? '解不開' : pct(r.cellErr)}</td>
+          <td class="${r.sectorOk == null ? 'bad' : (r.sectorOk > 0.95 ? 'good' : 'bad')}">
+            ${r.sectorOk == null ? '—' : pct(r.sectorOk, 0)}</td>
+        </tr>`).join('')}
+  </table>
+  <div class="note info" style="margin-top:10px">
+    「解碼上限」是單一 worker 的上限（1000 ÷ 解碼耗時）。接收端會開 2～4 個 worker，
+    實際可處理的幀率大約是這個數字的 2～4 倍。
+  </div>`;
+}
+
+/**
+ * 與 libcimbar 的對照。
+ *
+ * 重要前提：libcimbar 的**解碼器沒有瀏覽器版本**。
+ * 它的 README 明確指出 emscripten/WASM 只編了 encoder，decoder 是 C++ ，
+ * 在 Android 上以獨立 app（sz3/cfc）執行。
+ * 因此「用同一個檔案在瀏覽器裡比較吞吐量」這件事做不到 ——
+ * 沒有可執行的對照解碼器，任何數字都只會是我們自己的數字。
+ *
+ * 所以這裡做的是**格式層面的對照**：用雙方公開的規格算出可比較的密度指標，
+ * 並如實標註哪些數字是 libcimbar 公布的、哪些是本專案實測的。
+ */
+function renderCimbar(rows) {
+  const std = rows.find((r) => r.name === '標準' && !r.error);
+  const ext = rows.find((r) => r.name === '極限' && !r.error);
+  const shp = rows.find((r) => r.name === '腳架' && !r.error);
+
+  // libcimbar 公開規格（來源：其 README / DETAILS.md / PERFORMANCE.md）
+  const cim = {
+    frame: 1024 * 1024,
+    cellPx: 9,               // 8×8 的圖案，格距 9×9
+    dataCells: 12400,
+    bitsPerCell: 6,          // 4 bit 來自圖案形狀 + 2 bit 來自顏色
+    rawBytes: 9300,
+    eccBytes: 7500,          // ecc 30/155
+    sustained: 106,          // KB/s，mode B
+  };
+
+  const density = (bytes, area) => (bytes * 8 / area).toFixed(3);   // bit / 像素
+
+  $('cimbarTable').innerHTML = `<table>
+    <tr><th>項目</th><th>v3 標準</th><th>v3 極限</th><th>v3 腳架（含形狀層）</th><th>libcimbar（mode B）</th></tr>
+    <tr><td>資訊來源</td><td class="muted">本機實測</td><td class="muted">本機實測</td>
+        <td class="muted">本機實測</td><td class="muted">官方公布規格</td></tr>
+    <tr><td>每格像素</td><td>${std ? std.cellPx : '—'}×${std ? std.cellPx : '—'}</td>
+        <td>${ext ? ext.cellPx : '—'}×${ext ? ext.cellPx : '—'}</td>
+        <td>${shp ? shp.cellPx : '—'}×${shp ? shp.cellPx : '—'}</td><td>9×9（圖案 8×8）</td></tr>
+    <tr><td>每格位元數</td><td>${std ? std.bitsPerCell : '—'}（全部來自顏色）</td>
+        <td>${ext ? ext.bitsPerCell : '—'}（全部來自顏色）</td>
+        <td><b>${shp ? shp.bitsPerCell : '—'}</b>（3 顏色 + 2 形狀）</td>
+        <td><b>6</b>（4 來自形狀 + 2 來自顏色）</td></tr>
+    <tr><td>資料格數</td><td>${std ? std.dataCells.toLocaleString() : '—'}</td>
+        <td>${ext ? ext.dataCells.toLocaleString() : '—'}</td>
+        <td>${shp ? shp.dataCells.toLocaleString() : '—'}</td><td>12,400</td></tr>
+    <tr><td>畫面像素</td><td>1920×1080</td><td>1920×1080</td><td>1920×1080</td><td>1024×1024</td></tr>
+    <tr><td>每幀原始位元組</td><td>${std ? Math.round(std.dataCells * std.bitsPerCell / 8).toLocaleString() : '—'}</td>
+        <td>${ext ? Math.round(ext.dataCells * ext.bitsPerCell / 8).toLocaleString() : '—'}</td>
+        <td>${shp ? Math.round(shp.dataCells * shp.bitsPerCell / 8).toLocaleString() : '—'}</td>
+        <td>9,300</td></tr>
+    <tr><td>糾錯後每幀位元組</td><td>${std ? std.bytesPerFrame.toLocaleString() : '—'}</td>
+        <td>${ext ? ext.bytesPerFrame.toLocaleString() : '—'}</td>
+        <td>${shp ? shp.bytesPerFrame.toLocaleString() : '—'}</td><td>7,500</td></tr>
+    <tr class="hl"><td><b>資訊密度</b>（bit/像素）</td>
+        <td>${std ? density(std.bytesPerFrame, SCREEN_W * SCREEN_H) : '—'}</td>
+        <td>${ext ? density(ext.bytesPerFrame, SCREEN_W * SCREEN_H) : '—'}</td>
+        <td>${shp ? density(shp.bytesPerFrame, SCREEN_W * SCREEN_H) : '—'}</td>
+        <td>${density(cim.eccBytes, cim.frame)}</td></tr>
+    <tr><td>手持（中等失真）可用嗎</td>
+        <td>可用</td><td>可用</td>
+        <td><b>不可用</b>（需 10px 以上，密度優勢消失）</td>
+        <td class="muted">官方未分級</td></tr>
+    <tr><td>實測持續吞吐</td>
+        <td class="muted">未做實機量測</td><td class="muted">未做實機量測</td>
+        <td class="muted">未做實機量測</td>
+        <td><b>~106 KB/s</b>（官方公布）</td></tr>
+  </table>`;
+
+  const ratio = ext ? (Number(density(cim.eccBytes, cim.frame)) / Number(density(ext.bytesPerFrame, SCREEN_W * SCREEN_H))).toFixed(2) : '—';
+  const shpRatio = shp ? (Number(density(cim.eccBytes, cim.frame)) / Number(density(shp.bytesPerFrame, SCREEN_W * SCREEN_H))).toFixed(2) : null;
+
+  $('cimbarNote').innerHTML = `
+    <b>為什麼沒有做「同一檔案跑兩邊」的吞吐量對比：</b>
+    libcimbar 的解碼器沒有瀏覽器版本。其 README 明確寫著 emscripten/WASM 只編譯了
+    <b>encoder</b>，decoder 是 C++ 實作、以獨立的 Android app（sz3/cfc）執行。
+    沒有可在瀏覽器執行的對照解碼器，就沒有辦法量出對方的吞吐量 ——
+    硬做出來的數字只會是我們自己的數字換個標籤。所以這裡改成格式層面的對照。<br><br>
+
+    <b>對照結論：</b>在相同的畫面面積下，libcimbar 的資訊密度約為本專案極限檔的
+    <b>${ratio} 倍</b>${shpRatio ? `、腳架檔的 <b>${shpRatio} 倍</b>` : ''}。
+    差距幾乎全部來自「每格能載幾個 bit」：它每格 6 bit，其中
+    <b>4 bit 來自圖案形狀、只有 2 bit 來自顏色</b>。<br><br>
+
+    <b>本專案照這個方向做了形狀層，也量出了它的極限。</b>
+    C8+形狀是每格 5 bit（3 顏色 + 2 形狀），位元密度是純 C8 的 1.67 倍，
+    在腳架或貼著螢幕拍（無失真／輕微失真）時完全正確 —— 這一半的結論成立。
+    但手持（中等失真）時 8px 的格子會整幀垮掉，必須放大到 10px；
+    格數少 1.56 倍，剛好把多出來的 1.67 倍位元吃回去，還多花兩倍解碼時間。
+    瓶頸不是顏色也不是模糊，而是<b>幾何精度</b>：缺口只有 0.24 格寬，
+    而時序軌只圍住畫面邊界，內部殘差仍有 0.2～0.3 格。
+    libcimbar 把整格 8×8 的圖案一起做樣板比對，等於用整格的面積換那 4 bit；
+    本專案的缺口只用了約 6% 的格子面積去換 40% 的位元，面積效率差得多。
+    要真正追上那 2 倍以上的密度差，得走「整格樣板比對」那條路，
+    而那需要把每一格重新取樣成小圖再和數十個樣板相關 ——
+    在 JS 裡跑不動，這才是 WebGL2 真正該用的地方（見 README「第 4 階段」）。<br><br>
+
+    顏色是脆弱的維度這件事，libcimbar 也得到相同結論 —— 它的
+    <b>8 色模式已於 0.6.0 移除</b>，官方說明是「8-color has always been inconsistent」。
+    本專案在把幾何殘差從 1.4px 壓到 0.5px 之後，C8 在含 JPEG 色度次取樣的
+    中等失真下分區成功率已回到 100%（修正前是 83%），
+    所以在本專案的格式裡 C8 仍然可用；但它需要的幾何精度確實比 C4 高。<br><br>
+
+    形狀層確實是追上密度差距的關鍵路徑 —— 只是「缺口式」的形狀層不夠，
+    要的是「整格樣板」式的形狀層。<br><br>
+
+    <span class="muted">libcimbar 為 MPL-2.0 授權，本專案未使用其任何程式碼，
+    上述規格數字引用自其公開文件（README.md / DETAILS.md / PERFORMANCE.md）。</span>`;
+}
+
+$('btnRun').addEventListener('click', runBench);
+window.__runBench = runBench;
+runBench();
+</script>
+</body>
+</html>

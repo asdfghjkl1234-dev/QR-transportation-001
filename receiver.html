@@ -1,0 +1,584 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>QR 串流傳檔 — 接收端</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --border: #262b36;
+    --text: #e6e9ef; --muted: #9aa3b2; --accent: #4f9dff;
+    --ok: #45d483; --warn: #ffb648; --danger: #ff6b6b;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.6 system-ui, -apple-system, "Noto Sans TC", "Microsoft JhengHei", sans-serif;
+  }
+  .wrap { max-width: 720px; margin: 0 auto; padding: 20px 16px 48px; }
+  h1 { font-size: 19px; margin: 0 0 4px; }
+  .sub { color: var(--muted); font-size: 13px; margin: 0 0 18px; }
+  .sub a { color: var(--accent); }
+
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px; }
+  .card + .card { margin-top: 14px; }
+  .card h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em;
+             color: var(--muted); margin: 0 0 12px; font-weight: 600; }
+
+  button.btn { padding: 10px 18px; border-radius: 8px; border: 1px solid var(--border);
+               background: var(--panel); color: var(--text); cursor: pointer; font-size: 14px; }
+  button.btn:hover:not(:disabled) { border-color: var(--accent); }
+  button.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  button.btn.small { padding: 6px 12px; font-size: 13px; }
+  button.btn:disabled { opacity: .4; cursor: not-allowed; }
+  .buttons { display: flex; gap: 8px; flex-wrap: wrap; }
+
+  /* --- 相機畫面 --- */
+  #camWrap { position: relative; background: #000; border-radius: 10px; overflow: hidden;
+             aspect-ratio: 4 / 3; max-width: 100%; }
+  #video { width: 100%; height: 100%; object-fit: cover; display: block; }
+  #camIdle { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+             color: var(--muted); font-size: 13px; text-align: center; padding: 20px; }
+  #flash { position: absolute; inset: 0; background: var(--accent); opacity: 0;
+           pointer-events: none; transition: opacity .12s; }
+
+  /* --- 進度條 --- */
+  .bar { height: 10px; background: #0b0d11; border-radius: 999px; overflow: hidden; margin: 6px 0 10px; }
+  .bar > div { height: 100%; width: 0%; background: linear-gradient(90deg, var(--accent), var(--ok));
+               transition: width .18s ease-out; }
+  .barTop { display: flex; justify-content: space-between; font-size: 13px; }
+  .barTop b { font-variant-numeric: tabular-nums; }
+
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 10px; }
+  .stat { background: #0b0d11; border-radius: 8px; padding: 8px 10px; }
+  .stat .lbl { color: var(--muted); font-size: 11px; }
+  .stat .num { font-size: 16px; font-weight: 600; font-variant-numeric: tabular-nums; }
+
+  .kv { display: grid; grid-template-columns: auto 1fr; gap: 3px 14px; font-size: 13px; }
+  .kv dt { color: var(--muted); }
+  .kv dd { margin: 0; word-break: break-all; font-variant-numeric: tabular-nums; }
+
+  .note { border-radius: 8px; padding: 10px 12px; font-size: 12.5px; margin-top: 12px; }
+  .note.info { background: rgba(79,157,255,.1); border: 1px solid rgba(79,157,255,.35); color: var(--accent); }
+  .note.ok   { background: rgba(69,212,131,.1); border: 1px solid rgba(69,212,131,.35); color: var(--ok); }
+  .note.warn { background: rgba(255,182,72,.1); border: 1px solid rgba(255,182,72,.35); color: var(--warn); }
+  .note.err  { background: rgba(255,107,107,.1); border: 1px solid rgba(255,107,107,.35); color: var(--danger); }
+  .note .buttons { margin-top: 10px; }
+  .hidden { display: none !important; }
+
+  #preview img, #preview video { max-width: 100%; border-radius: 8px; display: block; background: #000; }
+  .badge { display: inline-block; font-size: 11px; padding: 2px 8px; border-radius: 999px;
+           background: #0b0d11; color: var(--muted); border: 1px solid var(--border); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>QR 串流傳檔 — 接收端</h1>
+  <p class="sub">
+    對準另一台裝置上的 <a href="sender.html">sender.html</a> 畫面持續掃描即可。
+    漏掃、重複掃、順序亂掉都沒關係。
+    <br><span class="badge" id="engineBadge">解碼引擎：偵測中…</span>
+  </p>
+
+  <div class="card">
+    <div id="camWrap">
+      <video id="video" playsinline muted></video>
+      <div id="camIdle">按下「開啟相機」開始掃描<br>（手機需要 HTTPS 或 localhost 才能存取相機）</div>
+      <div id="flash"></div>
+    </div>
+    <div class="buttons" style="margin-top:12px">
+      <button class="btn primary" id="btnStart">開啟相機</button>
+      <button class="btn" id="btnStop" disabled>停止</button>
+      <button class="btn" id="btnReset" disabled>清除已收資料</button>
+    </div>
+    <div id="camErr" class="note err hidden"></div>
+    <div id="sessionAsk" class="note warn hidden"></div>
+  </div>
+
+  <div class="card" id="progressCard">
+    <h2>接收進度</h2>
+    <div class="barTop">
+      <span id="pLabel">等待第一幀…</span>
+      <b id="pPct">0%</b>
+    </div>
+    <div class="bar"><div id="pBar"></div></div>
+
+    <div class="stats">
+      <div class="stat"><div class="lbl">有效幀</div><div class="num" id="sValid">0</div></div>
+      <div class="stat"><div class="lbl">有效幀 / 秒</div><div class="num" id="sRate">0</div></div>
+      <div class="stat"><div class="lbl">重複幀</div><div class="num" id="sDup">0</div></div>
+      <div class="stat"><div class="lbl">預估剩餘</div><div class="num" id="sEta">—</div></div>
+    </div>
+
+    <div id="metaBox" class="hidden" style="margin-top:14px">
+      <dl class="kv">
+        <dt>檔名</dt><dd id="mName">—</dd>
+        <dt>類型</dt><dd id="mType">—</dd>
+        <dt>大小</dt><dd id="mSize">—</dd>
+      </dl>
+    </div>
+  </div>
+
+  <div class="card hidden" id="resultCard">
+    <h2>接收結果</h2>
+    <div id="resultNote"></div>
+    <div id="preview" style="margin:12px 0"></div>
+    <div class="buttons">
+      <a id="btnDownload" class="btn primary" download>下載檔案</a>
+      <button class="btn" id="btnAgain">再接收一次</button>
+    </div>
+  </div>
+</div>
+
+<script type="module">
+import { base64ToBytes, decodePacket, LTDecoder, sha256Hex } from './fountain.js';
+
+const $ = (id) => document.getElementById(id);
+
+/* =====================================================================
+ * 狀態（全部在記憶體）
+ * ===================================================================== */
+const state = {
+  stream: null,
+  scanning: false,
+  detector: null,        // BarcodeDetector 實例（若支援）
+  worker: null,          // jsQR 的 Web Worker（退路）
+  workerBusy: false,
+  engine: '',            // 'native' | 'jsqr'
+  decoder: null,         // LTDecoder
+  pendingSession: null,  // 偵測到新 sessionId 時，暫存待使用者確認的第一個封包
+  ignoredSession: null,  // 使用者選擇「繼續收目前這份」時要忽略的 sessionId
+  validFrames: 0,
+  rateWindow: [],        // 最近的有效幀時間戳，用來算每秒有效幀數
+  acceptHistory: [],     // {t, accepted} 取樣點，用來估剩餘時間
+  finished: false,
+  objectUrl: null,       // 產生的 Blob URL，重置時要記得釋放
+  rafId: 0,
+};
+
+/* =====================================================================
+ * 小工具
+ * ===================================================================== */
+function fmtBytes(n) {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / 1024 / 1024).toFixed(2)} MB`;
+}
+function fmtDuration(sec) {
+  if (!isFinite(sec) || sec < 0) return '—';
+  if (sec < 60) return `${Math.ceil(sec)} 秒`;
+  return `${Math.floor(sec / 60)} 分 ${Math.round(sec % 60)} 秒`;
+}
+function showNote(id, cls, html) {
+  const el = $(id);
+  if (!html) { el.classList.add('hidden'); return; }
+  el.className = `note ${cls}`;
+  el.innerHTML = html;
+  el.classList.remove('hidden');
+}
+
+/* =====================================================================
+ * 解碼引擎：優先原生 BarcodeDetector，退回 Web Worker 裡的 jsQR
+ * =====================================================================
+ * BarcodeDetector 由瀏覽器原生實作（Android Chrome 支援良好），
+ * 可以直接吃 <video> 元素，不必先把畫面複製到 canvas，速度快很多。
+ * 不支援時（iOS Safari、桌面 Firefox 等）就退回 jsQR；
+ * jsQR 是純 JS 的，放在 Web Worker 裡跑才不會卡住主執行緒的畫面更新。
+ */
+
+// Worker 的程式碼直接內嵌成字串，用 Blob URL 建立，這樣整個接收端仍是單一 HTML。
+// 注意：classic worker 的 importScripts 允許跨來源載入，所以可以直接吃 CDN。
+const JSQR_CDN = 'https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js';
+// vendor/ 的路徑要換算成絕對 URL，因為 worker 是從 blob: URL 執行的，
+// 相對路徑會以 blob: 為基準而解析失敗。
+const JSQR_LOCAL = new URL('vendor/jsQR-1.4.0.js', location.href).href;
+
+const WORKER_SOURCE = `
+  // jsQR 1.4.0（Apache-2.0）。UMD 包裝在 worker 中會把 jsQR 掛到 self 上。
+  // 先試 CDN，失敗就退回本地備份，確保離線環境也能用。
+  try {
+    importScripts(${JSON.stringify(JSQR_CDN)});
+  } catch (e) {
+    importScripts(${JSON.stringify(JSQR_LOCAL)});
+  }
+  self.onmessage = (e) => {
+    const { buffer, width, height } = e.data;
+    let text = null;
+    try {
+      // dontInvert：螢幕上的 QR 一定是正常黑白極性，跳過反相嘗試可省一半時間
+      const r = self.jsQR(new Uint8ClampedArray(buffer), width, height,
+                          { inversionAttempts: 'dontInvert' });
+      if (r) text = r.data;
+    } catch (err) { /* 單幀解碼失敗就當作沒掃到，不影響後續 */ }
+    self.postMessage({ text });
+  };
+`;
+
+async function initEngine() {
+  // --- 先試原生 API ---
+  if ('BarcodeDetector' in window) {
+    try {
+      const formats = await window.BarcodeDetector.getSupportedFormats();
+      if (formats.includes('qr_code')) {
+        state.detector = new window.BarcodeDetector({ formats: ['qr_code'] });
+        state.engine = 'native';
+        $('engineBadge').textContent = '解碼引擎：瀏覽器原生 BarcodeDetector（最快）';
+        return;
+      }
+    } catch { /* 建構失敗就往下退回 jsQR */ }
+  }
+  // --- 退回 jsQR worker ---
+  const blob = new Blob([WORKER_SOURCE], { type: 'application/javascript' });
+  state.worker = new Worker(URL.createObjectURL(blob));
+  state.worker.onmessage = (e) => {
+    state.workerBusy = false;
+    if (e.data.text) handleQRText(e.data.text);
+  };
+  state.worker.onerror = () => {
+    state.workerBusy = false;
+    showNote('camErr', 'err', 'jsQR 載入失敗（可能是網路無法連到 CDN）。請確認網路連線後重新整理。');
+  };
+  state.engine = 'jsqr';
+  $('engineBadge').textContent = '解碼引擎：jsQR（Web Worker，相容模式）';
+}
+
+/* =====================================================================
+ * 相機
+ * ===================================================================== */
+async function startCamera() {
+  showNote('camErr', 'err', '');
+  try {
+    // facingMode: environment 優先用後鏡頭；解析度要求越高，越密的 QR 越掃得到
+    state.stream = await navigator.mediaDevices.getUserMedia({
+      video: {
+        facingMode: { ideal: 'environment' },
+        width: { ideal: 1920 },
+        height: { ideal: 1080 },
+        frameRate: { ideal: 30 },
+      },
+      audio: false,
+    });
+  } catch (e) {
+    let msg = `無法開啟相機：${e.name}`;
+    if (e.name === 'NotAllowedError') msg = '相機權限被拒絕。請在瀏覽器的網站設定中允許相機存取後再試。';
+    else if (e.name === 'NotFoundError') msg = '找不到相機裝置。';
+    else if (!window.isSecureContext) {
+      msg = '這個頁面不是安全來源（HTTPS 或 localhost），瀏覽器不允許存取相機。'
+          + '請改用 HTTPS 部署，或參考 README 的 cloudflared 通道做法。';
+    }
+    showNote('camErr', 'err', msg);
+    return;
+  }
+
+  const video = $('video');
+  video.srcObject = state.stream;
+  await video.play();
+
+  const track = state.stream.getVideoTracks()[0];
+  const s = track.getSettings();
+  $('camIdle').classList.add('hidden');
+  $('engineBadge').textContent += `　·　${s.width}×${s.height}`;
+
+  $('btnStart').disabled = true;
+  $('btnStop').disabled = false;
+  $('btnReset').disabled = false;
+
+  state.scanning = true;
+  scanLoop();
+}
+
+function stopCamera() {
+  state.scanning = false;
+  cancelAnimationFrame(state.rafId);
+  if (state.stream) {
+    state.stream.getTracks().forEach((t) => t.stop());
+    state.stream = null;
+  }
+  $('video').srcObject = null;
+  $('camIdle').classList.remove('hidden');
+  $('btnStart').disabled = false;
+  $('btnStop').disabled = true;
+}
+
+/* =====================================================================
+ * 擷取迴圈：盡可能對每一個 video frame 都嘗試解碼
+ * =====================================================================
+ * requestVideoFrameCallback 會在「有新的影像幀可用時」才回呼，
+ * 比 requestAnimationFrame 更精準（不會對同一幀重複解碼、也不會漏幀）。
+ * 舊瀏覽器沒有這個 API 時退回 rAF。
+ */
+const grabCanvas = document.createElement('canvas');
+const grabCtx = grabCanvas.getContext('2d', { willReadFrequently: true });
+
+function scheduleNextScan() {
+  if (!state.scanning) return;
+  const video = $('video');
+  if (video.requestVideoFrameCallback) video.requestVideoFrameCallback(() => scanLoop());
+  else state.rafId = requestAnimationFrame(() => scanLoop());
+}
+
+async function scanLoop() {
+  if (!state.scanning) return;
+  const video = $('video');
+
+  if (video.readyState < 2 /* HAVE_CURRENT_DATA */) { scheduleNextScan(); return; }
+
+  if (state.engine === 'native') {
+    try {
+      // 原生偵測器直接吃 video，省下一次畫面複製
+      const codes = await state.detector.detect(video);
+      for (const c of codes) if (c.rawValue) handleQRText(c.rawValue);
+    } catch { /* 偶發的偵測失敗略過即可 */ }
+  } else if (!state.workerBusy) {
+    // worker 還在忙就跳過這一幀 —— 硬塞只會讓佇列越積越長、延遲越來越大
+    const w = video.videoWidth, h = video.videoHeight;
+    if (w && h) {
+      if (grabCanvas.width !== w) { grabCanvas.width = w; grabCanvas.height = h; }
+      grabCtx.drawImage(video, 0, 0, w, h);
+      const img = grabCtx.getImageData(0, 0, w, h);
+      state.workerBusy = true;
+      // 用 transferable 移交 buffer，避免每幀複製好幾 MB 的像素
+      state.worker.postMessage({ buffer: img.data.buffer, width: w, height: h }, [img.data.buffer]);
+    }
+  }
+
+  scheduleNextScan();
+}
+
+/* =====================================================================
+ * 收到一段 QR 文字之後的處理
+ * ===================================================================== */
+function handleQRText(text) {
+  if (state.finished) return;
+
+  // base64 → 位元組 → 封包（CRC 不符或 magic 不對都會回傳 null，直接丟掉）
+  const bytes = base64ToBytes(text);
+  if (!bytes) return;
+  const pkt = decodePacket(bytes);
+  if (!pkt) return;
+
+  // --- sessionId 檢查：分辨這是不是同一次傳輸 ---
+  if (!state.decoder) {
+    state.decoder = new LTDecoder(pkt);
+  } else if (pkt.sessionId !== state.decoder.sessionId) {
+    // 使用者已經表明要忽略這個 session，就靜靜丟掉，不再打擾
+    if (pkt.sessionId === state.ignoredSession) return;
+    // 發送端重新開始播放（或掃到別台裝置）→ 問使用者要不要重置
+    if (!state.pendingSession) askNewSession(pkt);
+    return;
+  }
+
+  feedPacket(pkt);
+}
+
+/**
+ * 把一個已驗證、且屬於目前 session 的封包餵進解碼器，並更新 UI。
+ * @param {ReturnType<typeof decodePacket>} pkt
+ */
+function feedPacket(pkt) {
+  const before = state.decoder.solvedCount;
+  const r = state.decoder.addPacket(pkt);
+
+  // 重複幀（同一張 QR 被相機掃到好幾次）只更新統計數字
+  if (!r.accepted) { updateStats(); return; }
+
+  state.validFrames++;
+  const now = performance.now();
+  state.rateWindow.push(now);
+  while (state.rateWindow.length && now - state.rateWindow[0] > 3000) state.rateWindow.shift();
+  flash();
+
+  if (state.decoder.solvedCount !== before || pkt.isMetadata) updateMeta();
+  updateStats();
+
+  // 解完 + 拿到 metadata 才算完成（沒有 metadata 就不知道檔名與該比對哪個雜湊）
+  if (state.decoder.isComplete && state.decoder.metadata) finish();
+}
+
+/** 掃到有效幀時閃一下，給使用者「有在收」的即時回饋 */
+let flashTimer = 0;
+function flash() {
+  const el = $('flash');
+  el.style.opacity = '0.22';
+  clearTimeout(flashTimer);
+  flashTimer = setTimeout(() => { el.style.opacity = '0'; }, 70);
+}
+
+/** 偵測到新的 sessionId：詢問要不要丟掉目前進度重新接收 */
+function askNewSession(pkt) {
+  state.pendingSession = pkt;
+  const pct = Math.round(state.decoder.progress * 100);
+  showNote('sessionAsk', 'warn',
+    `偵測到<b>新的傳輸階段</b>（sessionId ${pkt.sessionId.toString(16)}，${fmtBytes(pkt.fileSize)}）。`
+    + `目前這一份已經收到 ${pct}%，要放棄它並改收新的嗎？`
+    + `<div class="buttons">
+         <button class="btn small primary" id="askYes">改收新的</button>
+         <button class="btn small" id="askNo">繼續收目前這份</button>
+       </div>`);
+  $('askYes').onclick = () => {
+    const p = state.pendingSession;
+    resetReception();                 // 清掉舊 session 的所有狀態（含 pendingSession）
+    state.decoder = new LTDecoder(p); // 用這個封包開啟新 session
+    feedPacket(p);                    // 這一包本身也要收進去，不要浪費
+  };
+  $('askNo').onclick = () => {
+    // 記住這個 sessionId，之後同一個 session 的封包就靜靜忽略，不再重複詢問
+    state.ignoredSession = pkt.sessionId;
+    state.pendingSession = null;
+    showNote('sessionAsk', 'warn', '');
+  };
+}
+
+
+
+/* =====================================================================
+ * UI 更新
+ * ===================================================================== */
+function updateStats() {
+  const d = state.decoder;
+  if (!d) return;
+
+  const pct = d.progress * 100;
+  $('pBar').style.width = `${pct.toFixed(1)}%`;
+  $('pPct').textContent = `${pct.toFixed(1)}%`;
+  $('pLabel').textContent = `已解出 ${d.solvedCount} / ${d.K} 個來源區塊`;
+
+  $('sValid').textContent = state.validFrames;
+  $('sDup').textContent = d.stats.duplicate;
+
+  // 每秒有效幀數：用最近 3 秒的視窗，比瞬時值穩定
+  const rate = state.rateWindow.length / 3;
+  $('sRate').textContent = rate.toFixed(1);
+
+  // 預估剩餘時間：
+  // 還需要多少「不重複的編碼區塊」≈ K × 1.10 − 已收到的，再除以每秒收到的速率。
+  // 用區塊數而不是進度百分比，是因為 peeling decoder 的進度是一陣一陣跳的，
+  // 直接對百分比外插會忽快忽慢；收區塊的速率則平穩得多。
+  const needed = Math.max(0, Math.ceil(d.K * 1.10) - d.stats.accepted);
+  $('sEta').textContent = rate > 0.2 ? fmtDuration(needed / rate) : '—';
+}
+
+function updateMeta() {
+  const d = state.decoder;
+  if (!d) return;
+  $('metaBox').classList.remove('hidden');
+  $('mSize').textContent = `${fmtBytes(d.fileSize)}（${d.K} 塊 × ${d.blockSize} B）`;
+  if (d.metadata) {
+    $('mName').textContent = d.metadata.name || '（未提供）';
+    $('mType').textContent = d.metadata.type || '（未提供）';
+  } else {
+    $('mName').textContent = '等待 metadata 幀…';
+    $('mType').textContent = '等待 metadata 幀…';
+  }
+}
+
+/* =====================================================================
+ * 完成：驗證 SHA-256 → 組 Blob → 顯示 / 下載
+ * ===================================================================== */
+function finish() {
+  state.finished = true;
+  const d = state.decoder;
+  const file = d.getFile();
+  const meta = d.metadata;
+
+  // 驗證整檔雜湊：這是唯一能確認「每個位元組都對」的手段
+  const actual = sha256Hex(file);
+  const ok = actual === meta.sha256;
+
+  const type = meta.type || 'application/octet-stream';
+  // subarray 是原始大 buffer 的視圖，要複製一份出來才不會把整塊記憶體綁在 Blob 上
+  const blob = new Blob([file.slice()], { type });
+  if (state.objectUrl) URL.revokeObjectURL(state.objectUrl);
+  state.objectUrl = URL.createObjectURL(blob);
+
+  $('resultCard').classList.remove('hidden');
+  if (ok) {
+    showNote('resultNote', 'ok',
+      `✅ 接收完成，SHA-256 驗證通過。<br>共 ${state.validFrames} 個有效幀，`
+      + `解出 ${d.K} 個區塊（開銷 +${((d.stats.accepted / d.K - 1) * 100).toFixed(0)}%）。`);
+  } else {
+    // 理論上 CRC32 已經擋掉絕大多數壞封包，走到這裡代表發生了極罕見的碰撞。
+    // 檔案仍然提供下載（標明未通過驗證），並讓使用者可以重新接收一次。
+    showNote('resultNote', 'err',
+      `⚠️ SHA-256 <b>不相符</b>，檔案可能有損毀。<br>`
+      + `預期 <code>${meta.sha256.slice(0, 16)}…</code>，實際 <code>${actual.slice(0, 16)}…</code><br>`
+      + `下方仍可下載（內容未經驗證）。建議按「再接收一次」重掃一遍。`);
+  }
+
+  // 依 MIME type 直接把結果呈現出來
+  const preview = $('preview');
+  preview.innerHTML = '';
+  if (type.startsWith('image/')) {
+    const img = document.createElement('img');
+    img.src = state.objectUrl;
+    preview.appendChild(img);
+  } else if (type.startsWith('video/')) {
+    const v = document.createElement('video');
+    v.src = state.objectUrl;
+    v.controls = true;
+    v.playsInline = true;
+    preview.appendChild(v);
+  } else {
+    preview.innerHTML = `<span class="badge">${type} — 沒有內建預覽，請直接下載</span>`;
+  }
+
+  const a = $('btnDownload');
+  a.href = state.objectUrl;
+  a.download = meta.name || 'received.bin';   // 用原始檔名下載
+
+  // 收完就把相機關掉省電；使用者按「再接收一次」會重新開啟
+  stopCamera();
+}
+
+/* =====================================================================
+ * 重置
+ * ===================================================================== */
+function resetReception() {
+  state.decoder = null;
+  state.pendingSession = null;
+  state.ignoredSession = null;
+  state.validFrames = 0;
+  state.rateWindow = [];
+  state.finished = false;
+  if (state.objectUrl) { URL.revokeObjectURL(state.objectUrl); state.objectUrl = null; }
+
+  $('resultCard').classList.add('hidden');
+  $('preview').innerHTML = '';
+  $('metaBox').classList.add('hidden');
+  $('pBar').style.width = '0%';
+  $('pPct').textContent = '0%';
+  $('pLabel').textContent = '等待第一幀…';
+  $('sValid').textContent = '0';
+  $('sDup').textContent = '0';
+  $('sRate').textContent = '0';
+  $('sEta').textContent = '—';
+  showNote('sessionAsk', 'warn', '');
+}
+
+/* =====================================================================
+ * 事件綁定
+ * ===================================================================== */
+$('btnStart').addEventListener('click', startCamera);
+$('btnStop').addEventListener('click', stopCamera);
+$('btnReset').addEventListener('click', resetReception);
+$('btnAgain').addEventListener('click', () => { resetReception(); startCamera(); });
+
+// 分頁被切到背景時停止解碼（省電），回來再繼續
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    state.scanning = false;
+  } else if (state.stream && !state.finished) {
+    state.scanning = true;
+    scanLoop();
+  }
+});
+
+initEngine();
+
+// 供自動化測試用的注入點：讓測試腳本能餵進「假裝掃到的 QR 文字」，
+// 藉此驗證整條接收流程（session 判斷 → 解碼 → SHA-256 驗證 → 預覽與下載），
+// 而不需要真的架一台相機對著螢幕。正常使用不會碰到這個。
+window.__injectScan = handleQRText;
+</script>
+</body>
+</html>
